@@ -13,7 +13,7 @@
     topDeckOptionsPerWork: 120, // 各ワークで保持する候補デッキ数
     optimizeYieldEvery: 250,
     storageCacheVersion: 1,
-    storageCacheMaxEntries: 48,
+    storageCacheMaxEntries: 300,
     prefilterOverallKeep: 260,
     prefilterPerClubKeep: 32,
     prefilterFocusClubCount: 10,
@@ -110,6 +110,7 @@
     state.works = detectWorks();
     setStatus(`総所持 ${allOwnedRoots.length} 枚 / 未使用 ${state.cards.length} 枚 / ワーク ${state.works.filter(w => w.unlocked).length} 件を読み込みました`);
     setResultHtml(renderLoadedPreview());
+    void pruneInvalidCachedSearches();
   }
 
   function syncStateSilently() {
@@ -117,6 +118,7 @@
     state.cards = parseOwnedCardsRobust();
     state.works = detectWorks();
     setStatus(`総所持 ${allOwnedRoots.length} 枚 / 未使用 ${state.cards.length} 枚 / ワーク ${state.works.filter(w => w.unlocked).length} 件を再同期しました`);
+    void pruneInvalidCachedSearches();
   }
 
   // =========================
@@ -2361,7 +2363,6 @@
 
   function serializeCachedOptions(options, cards) {
     return options.map(option => ({
-      score: option.score || 0,
       key: option.key || '',
       exploredAt: option.exploredAt || 0,
       deckRefs: serializeDeckRefs(option.deck || [], cards),
@@ -2377,7 +2378,7 @@
       restored.push({
         workName,
         deck,
-        score: deck.length ? detail.total : (option.score || 0),
+        score: deck.length ? detail.total : 0,
         detail,
         key: option.key || deck.map(c => c.id).sort().join('|'),
         exploredAt: option.exploredAt || 0,
@@ -2436,6 +2437,75 @@
     if (removed.length) {
       await storageRemove(removed);
     }
+  }
+
+  async function pruneInvalidCachedSearches() {
+    const loaded = await storageGet(CACHE_INDEX_KEY);
+    const index = Array.isArray(loaded?.[CACHE_INDEX_KEY]) ? loaded[CACHE_INDEX_KEY] : [];
+    if (!index.length) return;
+
+    const signatureCounts = collectAvailableCardSignatureCounts();
+    const allKeys = index.map(item => item.key).filter(Boolean);
+    const stored = await storageGet(allKeys);
+    const validIndex = [];
+    const invalidKeys = [];
+
+    for (const item of index) {
+      const cacheKey = item?.key;
+      const payload = cacheKey ? stored?.[cacheKey] : null;
+      if (!cacheKey || !payload) continue;
+
+      if (isCachedPayloadValid(payload, signatureCounts)) {
+        validIndex.push(item);
+      } else {
+        invalidKeys.push(cacheKey);
+      }
+    }
+
+    if (invalidKeys.length) {
+      await storageRemove(invalidKeys);
+      await storageSet({ [CACHE_INDEX_KEY]: validIndex });
+    }
+  }
+
+  function isCachedPayloadValid(payload, availableSignatureCounts) {
+    const options = payload?.options || [];
+    for (const option of options) {
+      const refs = option?.deckRefs || [];
+      const required = new Map();
+      for (const ref of refs) {
+        if (!ref?.sig) continue;
+        required.set(ref.sig, (required.get(ref.sig) || 0) + 1);
+      }
+      for (const [sig, count] of required.entries()) {
+        if ((availableSignatureCounts.get(sig) || 0) < count) {
+          return false;
+        }
+      }
+    }
+    return true;
+  }
+
+  function collectAvailableCardSignatureCounts() {
+    const counts = new Map();
+    const seenRoots = new Set();
+    const pushRoot = (root) => {
+      if (!root || seenRoots.has(root)) return;
+      seenRoots.add(root);
+      const info = parseCardSignature(root);
+      if (!info?.name || info.power == null || !info.club) return;
+      const sig = getCardSignatureKey(info);
+      counts.set(sig, (counts.get(sig) || 0) + 1);
+    };
+
+    findOwnedCardRoots().forEach(pushRoot);
+    for (const workName of WORK_ORDER) {
+      const workRoot = findWorkRoot(workName);
+      if (!workRoot) continue;
+      findFilledWorkCardRoots(workRoot).forEach(pushRoot);
+    }
+
+    return counts;
   }
 
   function buildSearchCacheKey(cards, workName) {
