@@ -12,6 +12,8 @@
   const CONFIG = {
     topDeckOptionsPerWork: 120, // 各ワークで保持する候補デッキ数
     optimizeYieldEvery: 250,
+    storageCacheVersion: 1,
+    storageCacheMaxEntries: 48,
     prefilterOverallKeep: 260,
     prefilterPerClubKeep: 32,
     prefilterFocusClubCount: 10,
@@ -85,7 +87,11 @@
     works: [],
     singleResults: {},
     globalPlan: null,
+    cacheIndexLoaded: false,
   };
+
+  const CACHE_INDEX_KEY = 'cpcc_optimizer_cache_index_v1';
+  const CACHE_KEY_PREFIX = 'cpcc_optimizer_cache_v1:';
 
   // =========================
   // 初期化
@@ -1134,6 +1140,13 @@
 
   async function searchTopDeckOptions(cards, workName, maxKeep = CONFIG.topDeckOptionsPerWork, onProgress = null) {
     const rule = WORK_RULES[workName];
+    const cacheKey = buildSearchCacheKey(cards, workName);
+    const cached = await loadSearchCache(cacheKey, cards, workName);
+    if (cached) {
+      onProgress?.(`${workName}: 保存済みキャッシュを使用しました`);
+      return cached;
+    }
+
     const prefilteredCards = prefilterCardsForSearch(cards, rule);
     const analysis = createCardAnalysis(prefilteredCards, rule);
     const candidates = buildCandidates(prefilteredCards, rule, analysis);
@@ -1147,13 +1160,15 @@
     };
 
     if (candidates.length === 0) {
-      return {
+      const result = {
         workName,
         rule,
         candidates,
         options: [emptyOption],
         explored: 0,
       };
+      await saveSearchCache(cacheKey, cards, workName, result);
+      return result;
     }
 
     const progress = createSynergySearchProgress(workName, onProgress);
@@ -1173,13 +1188,15 @@
     }
 
     options.sort((a, b) => b.score - a.score);
-    return {
+    const result = {
       workName,
       rule,
       candidates,
       options,
       explored: exactResult.explored,
     };
+    await saveSearchCache(cacheKey, cards, workName, result);
+    return result;
   }
 
   async function enumerateTopDeckOptionsBySynergy(candidates, rule, analysis, { maxKeep, workName, onProgress }) {
@@ -2285,6 +2302,181 @@
 
   function formatNum(v) {
     return Number(v || 0).toLocaleString();
+  }
+
+  function getStorageArea() {
+    return globalThis.chrome?.storage?.local || null;
+  }
+
+  async function storageGet(keys) {
+    const area = getStorageArea();
+    if (!area) return {};
+    return await new Promise(resolve => area.get(keys, resolve));
+  }
+
+  async function storageSet(items) {
+    const area = getStorageArea();
+    if (!area) return;
+    await new Promise(resolve => area.set(items, resolve));
+  }
+
+  async function storageRemove(keys) {
+    const area = getStorageArea();
+    if (!area) return;
+    await new Promise(resolve => area.remove(keys, resolve));
+  }
+
+  async function loadSearchCache(cacheKey, cards, workName) {
+    const stored = await storageGet(cacheKey);
+    const payload = stored?.[cacheKey];
+    if (!payload || payload.version !== CONFIG.storageCacheVersion || payload.workName !== workName) {
+      return null;
+    }
+
+    const options = restoreCachedOptions(payload.options, cards, workName);
+    if (!options.length) return null;
+
+    return {
+      workName,
+      rule: WORK_RULES[workName],
+      candidates: [],
+      options,
+      explored: payload.explored || 0,
+      fromCache: true,
+    };
+  }
+
+  async function saveSearchCache(cacheKey, cards, workName, searched) {
+    const payload = {
+      version: CONFIG.storageCacheVersion,
+      workName,
+      savedAt: Date.now(),
+      explored: searched.explored || 0,
+      options: serializeCachedOptions(searched.options || [], cards),
+    };
+
+    await storageSet({ [cacheKey]: payload });
+    await touchCacheIndex(cacheKey, payload.savedAt);
+  }
+
+  function serializeCachedOptions(options, cards) {
+    return options.map(option => ({
+      score: option.score || 0,
+      key: option.key || '',
+      exploredAt: option.exploredAt || 0,
+      deckRefs: serializeDeckRefs(option.deck || [], cards),
+    }));
+  }
+
+  function restoreCachedOptions(options, cards, workName) {
+    const restored = [];
+    for (const option of options || []) {
+      const deck = restoreDeckRefs(option.deckRefs || [], cards);
+      if ((option.deckRefs || []).length && deck.length !== option.deckRefs.length) continue;
+      const detail = evaluateDeck(deck, WORK_RULES[workName]);
+      restored.push({
+        workName,
+        deck,
+        score: deck.length ? detail.total : (option.score || 0),
+        detail,
+        key: option.key || deck.map(c => c.id).sort().join('|'),
+        exploredAt: option.exploredAt || 0,
+      });
+    }
+    return restored;
+  }
+
+  function serializeDeckRefs(deck, cards) {
+    const indexById = new Map(cards.map((card, index) => [card.id, index]));
+    return deck.map(card => ({
+      id: card.id,
+      index: indexById.get(card.id) ?? -1,
+      sig: getCardSignatureKey(card),
+    }));
+  }
+
+  function restoreDeckRefs(deckRefs, cards) {
+    const usedIds = new Set();
+    const bySignature = new Map();
+
+    for (const card of cards) {
+      const sig = getCardSignatureKey(card);
+      const arr = bySignature.get(sig) || [];
+      arr.push(card);
+      bySignature.set(sig, arr);
+    }
+
+    return deckRefs.map(ref => {
+      const byId = cards[ref.index];
+      if (byId && byId.id === ref.id && !usedIds.has(byId.id)) {
+        usedIds.add(byId.id);
+        return byId;
+      }
+
+      const arr = bySignature.get(ref.sig) || [];
+      const fallback = arr.find(card => !usedIds.has(card.id));
+      if (fallback) {
+        usedIds.add(fallback.id);
+        return fallback;
+      }
+      return null;
+    }).filter(Boolean);
+  }
+
+  async function touchCacheIndex(cacheKey, savedAt) {
+    const loaded = await storageGet(CACHE_INDEX_KEY);
+    const index = Array.isArray(loaded?.[CACHE_INDEX_KEY]) ? loaded[CACHE_INDEX_KEY] : [];
+    const filtered = index.filter(item => item?.key !== cacheKey);
+    filtered.unshift({ key: cacheKey, savedAt });
+
+    const trimmed = filtered.slice(0, CONFIG.storageCacheMaxEntries);
+    const removed = filtered.slice(CONFIG.storageCacheMaxEntries).map(item => item.key);
+
+    await storageSet({ [CACHE_INDEX_KEY]: trimmed });
+    if (removed.length) {
+      await storageRemove(removed);
+    }
+  }
+
+  function buildSearchCacheKey(cards, workName) {
+    const rule = WORK_RULES[workName];
+    const parts = cards
+      .map(card => [
+        card.name,
+        card.power,
+        card.club,
+        card.rarity,
+        card.effects.map(eff => `${eff.club}:${eff.value}`).sort().join(','),
+      ].join('/'))
+      .sort();
+
+    const base = JSON.stringify({
+      version: CONFIG.storageCacheVersion,
+      workName,
+      rule,
+      config: {
+        topDeckOptionsPerWork: CONFIG.topDeckOptionsPerWork,
+        prefilterOverallKeep: CONFIG.prefilterOverallKeep,
+        prefilterPerClubKeep: CONFIG.prefilterPerClubKeep,
+        candidateOverallKeep: CONFIG.candidateOverallKeep,
+        candidatePerClubKeep: CONFIG.candidatePerClubKeep,
+        synergyAnchorKeep: CONFIG.synergyAnchorKeep,
+        synergyPairAnchorKeep: CONFIG.synergyPairAnchorKeep,
+        synergyPoolKeep: CONFIG.synergyPoolKeep,
+        synergyGeneralKeep: CONFIG.synergyGeneralKeep,
+      },
+      cards: parts,
+    });
+    return `${CACHE_KEY_PREFIX}${hashString(base)}`;
+  }
+
+  function hashString(str) {
+    let hash = 2166136261;
+    for (let i = 0; i < str.length; i++) {
+      hash ^= str.charCodeAt(i);
+      hash = Math.imul(hash, 16777619);
+    }
+    return (hash >>> 0).toString(16);
   }
 
   function sleep(ms) {
