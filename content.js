@@ -142,26 +142,46 @@
         .cpcc-ok{color:#86efac}
         
         .cpcc-highlight-card{
-          outline: 4px solid #22c55e !important;
-          outline-offset: -2px !important;
-          box-shadow: 0 0 0 4px rgba(34,197,94,.25), 0 0 24px rgba(34,197,94,.45) !important;
+          outline: 8px solid #22c55e !important;
+          outline-offset: -3px !important;
+          box-shadow:
+            0 0 0 6px rgba(34,197,94,.35),
+            0 0 30px rgba(34,197,94,.75),
+            inset 0 0 0 3px rgba(255,255,255,.85) !important;
+          border-radius: 14px !important;
           position: relative;
-          z-index: 2;
+          z-index: 5 !important;
+          transition: box-shadow .15s ease, outline-color .15s ease;
         }
 
         .cpcc-highlight-card[data-cpcc-work]::after{
           content: attr(data-cpcc-work);
           position: absolute;
-          left: 6px;
-          top: 6px;
-          background: rgba(34,197,94,.95);
+          left: 8px;
+          top: 8px;
+          background: rgba(34,197,94,.98);
           color: #fff;
-          font-size: 11px;
-          font-weight: 700;
-          padding: 2px 6px;
+          font-size: 12px;
+          font-weight: 800;
+          padding: 4px 8px;
           border-radius: 999px;
           pointer-events: none;
-          z-index: 3;
+          z-index: 6;
+          box-shadow: 0 2px 10px rgba(0,0,0,.25);
+        }
+        .cpcc-result-card{
+          cursor: pointer;
+          transition: transform .12s ease, background-color .12s ease;
+        }
+
+        .cpcc-result-card:hover{
+          transform: translateY(-1px);
+          background: rgba(255,255,255,.14);
+        }
+
+        .cpcc-result-card.is-active-jump{
+          outline: 3px solid #60a5fa;
+          box-shadow: 0 0 18px rgba(96,165,250,.55);
         }
       `;
       document.head.appendChild(style);
@@ -220,6 +240,67 @@
         setStatus('全プランのカードをハイライトしました');
       };
     });
+
+    document.querySelectorAll('.cpcc-result-card').forEach(el => {
+      el.onclick = () => {
+        const cardId = el.dataset.cpccCardId;
+        const cardName = el.dataset.cpccCardName;
+
+        const card = state.cards.find(c => c.id === cardId) || state.cards.find(c => c.name === cardName);
+        if (!card) return;
+
+        jumpToOwnedCard(card, el);
+      };
+    });
+  }
+
+  function jumpToOwnedCard(card, resultEl = null) {
+    const target = findOwnedCardRootForSelection(card);
+    if (!target) {
+      setStatus(`カード位置が見つかりません: ${card.name}`);
+      return;
+    }
+
+    try {
+      target.scrollIntoView({
+        block: 'center',
+        inline: 'nearest',
+        behavior: 'smooth',
+      });
+    } catch { }
+
+    flashJumpTarget(target);
+
+    if (resultEl) {
+      document.querySelectorAll('.cpcc-result-card.is-active-jump').forEach(el => {
+        el.classList.remove('is-active-jump');
+      });
+      resultEl.classList.add('is-active-jump');
+      setTimeout(() => resultEl.classList.remove('is-active-jump'), 1200);
+    }
+
+    setStatus(`カード位置へ移動: ${card.name}`);
+  }
+
+  function flashJumpTarget(el) {
+    if (!el) return;
+
+    const oldTransition = el.style.transition;
+    const oldOutline = el.style.outline;
+    const oldBoxShadow = el.style.boxShadow;
+    const oldZIndex = el.style.zIndex;
+
+    el.style.transition = 'all .12s ease';
+    el.style.outline = '10px solid #f59e0b';
+    el.style.boxShadow = '0 0 0 8px rgba(245,158,11,.35), 0 0 40px rgba(245,158,11,.8)';
+    el.style.zIndex = '8';
+
+    setTimeout(() => {
+      el.style.outline = oldOutline;
+      el.style.boxShadow = oldBoxShadow;
+      el.style.zIndex = oldZIndex;
+      el.style.transition = oldTransition;
+    }, 1200);
   }
 
   function renderLoadedPreview() {
@@ -829,13 +910,19 @@
 
     return deck.map(c => {
       const d = detail?.byCard?.[c.id] || { bonusPercent: 0, baseAfterWork: c.power, finalPower: c.power };
+
       return `
-        <div class="cpcc-card">
-          <div class="cpcc-title">${escapeHtml(c.name)} <span class="cpcc-sub">[${escapeHtml(c.rarity)}]</span></div>
-          <div>部活: ${escapeHtml(c.club)} / 基礎Power: ${c.power}</div>
-          <div>場効果後: ${formatNum(d.baseAfterWork)} / 部活補正: ${d.bonusPercent > 0 ? '+' : ''}${d.bonusPercent}% / 最終: ${formatNum(d.finalPower)}</div>
-        </div>
-      `;
+      <div
+        class="cpcc-card cpcc-result-card"
+        data-cpcc-card-id="${escapeHtml(c.id)}"
+        data-cpcc-card-name="${escapeHtml(c.name)}"
+        title="クリックでカード位置へスクロール"
+      >
+        <div class="cpcc-title">${escapeHtml(c.name)} <span class="cpcc-sub">[${escapeHtml(c.rarity)}]</span></div>
+        <div>部活: ${escapeHtml(c.club)} / 基礎Power: ${c.power}</div>
+        <div>場効果後: ${formatNum(d.baseAfterWork)} / 部活補正: ${d.bonusPercent > 0 ? '+' : ''}${d.bonusPercent}% / 最終: ${formatNum(d.finalPower)}</div>
+      </div>
+    `;
     }).join('');
   }
 
@@ -1158,14 +1245,6 @@
 
       root.classList.add('cpcc-highlight-card');
       root.setAttribute('data-cpcc-work', workName);
-
-      try {
-        root.scrollIntoView({
-          block: 'center',
-          inline: 'center',
-          behavior: 'smooth',
-        });
-      } catch { }
     }
   }
 
