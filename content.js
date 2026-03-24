@@ -2028,33 +2028,9 @@
     await removeWorkEntries(workName, entriesToRemove);
 
     for (const card of diff.toAdd) {
-      const currentRoot = findWorkRoot(workName);
-      const countBefore = currentRoot ? parseCurrentCount(currentRoot) : 0;
-      if (countBefore >= 5) {
-        setStatus(`${workName}: 既に5枚入っています`);
-        break;
-      }
-
-      await activateWorkBase(workName);
-
-      const cardRoot = findOwnedCardRootForSelectionEx(card, { excludeInDeck: true });
-      if (!cardRoot) {
-        setStatus(`${workName}: カードが見つかりません ${card.name}`);
-        continue;
-      }
-
-      const target = findClickableCardTarget(cardRoot);
-      if (!target) {
-        setStatus(`${workName}: クリック対象が見つかりません ${card.name}`);
-        continue;
-      }
-
-      simulateClick(target);
-      highlightElement(target, 'red');
-      await sleep(CONFIG.autoStepDelay);
-      const changed = await waitForWorkCountAtLeast(workName, countBefore + 1, 2500);
-      if (!changed) {
-        await sleep(CONFIG.autoClickDelayLong);
+      const added = await addCardToWorkWithRetry(workName, card);
+      if (!added) {
+        setStatus(`${workName}: 設定に失敗しました ${card.name}`);
       }
     }
 
@@ -2063,20 +2039,67 @@
 
   async function removeWorkEntries(workName, entries) {
     for (const entry of entries) {
+      await removeWorkEntryWithRetry(workName, entry);
+    }
+  }
+
+  async function addCardToWorkWithRetry(workName, card, attempts = 3) {
+    for (let attempt = 0; attempt < attempts; attempt++) {
+      const currentRoot = findWorkRoot(workName);
+      const countBefore = currentRoot ? parseCurrentCount(currentRoot) : 0;
+      if (countBefore >= 5) return true;
+
+      await activateWorkBase(workName);
+      const cardRoot = findOwnedCardRootForSelectionEx(card, { excludeInDeck: true });
+      if (!cardRoot) {
+        await sleep(CONFIG.autoClickDelayLong);
+        continue;
+      }
+
+      const target = findClickableCardTarget(cardRoot);
+      if (!target) {
+        await sleep(CONFIG.autoClickDelayLong);
+        continue;
+      }
+
+      simulateClick(target);
+      highlightElement(target, 'red');
+      await sleep(CONFIG.autoStepDelay);
+      const changed = await waitForWorkCountAtLeast(workName, countBefore + 1, 3500);
+      if (changed) return true;
+
+      await sleep(CONFIG.autoClickDelayLong);
+    }
+
+    return false;
+  }
+
+  async function removeWorkEntryWithRetry(workName, entry, attempts = 3) {
+    for (let attempt = 0; attempt < attempts; attempt++) {
       await activateWorkBase(workName);
       const rootNow = findWorkRoot(workName);
       const countBefore = rootNow ? parseCurrentCount(rootNow) : 0;
-      if (countBefore <= 0) break;
-      if (!entry.root?.isConnected) continue;
+      if (countBefore <= 0) return true;
 
-      simulateClick(entry.root);
-      highlightElement(entry.root, 'orange');
-      await sleep(CONFIG.autoStepDelay);
-      const changed = await waitForWorkCountLessThan(workName, countBefore, 4000);
-      if (!changed) {
-        await sleep(CONFIG.autoClickDelayLong);
+      const liveEntry = entry.root?.isConnected ? entry.root : findMatchingWorkEntryRoot(workName, entry.key);
+      if (!liveEntry) {
+        return true;
       }
+
+      simulateClick(liveEntry);
+      highlightElement(liveEntry, 'orange');
+      await sleep(CONFIG.autoStepDelay);
+      const changed = await waitForWorkCountLessThan(workName, countBefore, 4500);
+      if (changed) return true;
+
+      await sleep(CONFIG.autoClickDelayLong);
     }
+
+    return false;
+  }
+
+  function findMatchingWorkEntryRoot(workName, key) {
+    return getCurrentWorkCardEntries(workName).find(entry => entry.key === key)?.root || null;
   }
 
   function highlightElement(el, color = 'red') {
