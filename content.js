@@ -52,6 +52,14 @@
   };
 
   const WORK_ORDER = Object.keys(WORK_RULES);
+  const WORK_DOM_IDS = {
+    'たまり場': 'tamari',
+    '生徒会室': 'council',
+    'ダンスステージ': 'dance',
+    'カフェバー': 'cafe',
+    'ポータル': 'portal',
+    '作業部屋': 'workshop',
+  };
 
   const state = {
     cards: [],
@@ -348,11 +356,23 @@
 
   function parseOwnedCardsRobust() {
     const roots = findOwnedCardRoots();
+    const usedCardCounts = collectUsedCardCounts();
     const cards = [];
 
     roots.forEach((root, index) => {
       const card = parseCardFromRoot(root, index);
-      if (card) cards.push(card);
+      if (card) {
+        root.dataset.cpccOwnedCardId = card.id;
+        const signatureKey = getCardSignatureKey(card);
+        if (usedCardCounts.get(signatureKey) > 0) {
+          usedCardCounts.set(signatureKey, usedCardCounts.get(signatureKey) - 1);
+          return;
+        }
+
+        if (!card.inDeck) {
+          cards.push(card);
+        }
+      }
     });
 
     return cards;
@@ -408,28 +428,19 @@
   }
 
   function parseCardFromRoot(root, index) {
-    const text = normalizeSpace(root.innerText || root.textContent || '');
-    const img = findMainCardImage(root);
-    if (!img) return null;
+    const info = parseCardSignature(root);
+    if (!info?.name || info.power == null || !info.club) return null;
 
-    const name = (img.getAttribute('alt') || '').trim();
-    const powerMatch = text.match(/Power\s*(\d+)/i);
-    if (!name || !powerMatch) return null;
-
-    const power = Number(powerMatch[1]);
-    const rarity = parseRarity(root) || 'N';
-    const club = parseClub(text);
-    const effects = parseEffects(text);
-
-    if (!club) return null;
+    const effects = parseEffectsFromRoot(root);
 
     return {
-      id: `${name}__${power}__${club}__${rarity}__${index}`,
-      name,
-      power,
-      club,
-      rarity,
+      id: `${info.name}__${info.power}__${info.club}__${info.rarity}__${index}`,
+      name: info.name,
+      power: info.power,
+      club: info.club,
+      rarity: info.rarity,
       effects,
+      inDeck: root.classList.contains('in-deck'),
       root,
     };
   }
@@ -452,6 +463,22 @@
     return CLUBS.find(club => text.includes(club)) || null;
   }
 
+  function parseClubFromRoot(root, fallbackText = '') {
+    const clubCandidates = [
+      root.querySelector('.card-club .club-text'),
+      root.querySelector('.club-text'),
+      root.querySelector('.card-club'),
+    ].filter(Boolean);
+
+    for (const el of clubCandidates) {
+      const text = normalizeSpace(el.textContent || '');
+      const club = parseClub(text);
+      if (club) return club;
+    }
+
+    return fallbackText ? parseClub(fallbackText) : null;
+  }
+
   function parseEffects(text) {
     const effects = [];
     for (const club of CLUBS) {
@@ -468,20 +495,77 @@
     return effects;
   }
 
+  function parseEffectsFromRoot(root) {
+    const effects = [];
+    const badgeTexts = [...root.querySelectorAll('.card-options [title]')]
+      .map(el => (el.getAttribute('title') || '').trim())
+      .filter(Boolean);
+
+    if (badgeTexts.length) {
+      for (const text of badgeTexts) {
+        const club = parseClub(text);
+        const valueMatch = text.match(/([+-]\d+)%/);
+        if (!club || !valueMatch) continue;
+
+        effects.push({
+          club,
+          value: Number(valueMatch[1]),
+        });
+      }
+      return effects;
+    }
+
+    const text = normalizeSpace(root.innerText || root.textContent || '');
+    return parseEffects(text);
+  }
+
+  function getCardSignatureKey(card) {
+    return [card.name, card.power, card.club, card.rarity].join('__');
+  }
+
+  function collectUsedCardCounts() {
+    const counts = new Map();
+
+    for (const workName of WORK_ORDER) {
+      const root = findWorkRoot(workName);
+      if (!root) continue;
+
+      for (const cardRoot of findFilledWorkCardRoots(root)) {
+        const info = parseCardSignature(cardRoot);
+        if (!info?.name || info.power == null || !info.club) continue;
+
+        const key = getCardSignatureKey(info);
+        counts.set(key, (counts.get(key) || 0) + 1);
+      }
+    }
+
+    return counts;
+  }
+
   // =========================
   // ワーク読み込み
   // =========================
 
   function detectWorks() {
+    let previousUnlocked = true;
+
     return WORK_ORDER.map(name => {
       const root = findWorkRoot(name);
-      const unlocked = !!root && !normalizeSpace(root.innerText || root.textContent || '').includes('解放する');
+      const selfUnlocked = !!root && !normalizeSpace(root.innerText || root.textContent || '').includes('解放する');
+      const unlocked = previousUnlocked && selfUnlocked;
       const count = root ? parseCurrentCount(root) : 0;
+      previousUnlocked = unlocked;
       return { name, root, unlocked, currentCount: count };
     });
   }
 
   function findWorkRoot(workName) {
+    const baseId = WORK_DOM_IDS[workName];
+    if (baseId) {
+      const direct = document.getElementById(`base-${baseId}`);
+      if (direct) return direct;
+    }
+
     const all = [...document.querySelectorAll('div, section, article')];
     let best = null;
     let bestScore = -Infinity;
@@ -967,6 +1051,7 @@
     }
 
     setStatus(`${workName}: ${deck.length} 枚をセット中...`);
+    const usedRoots = new Set();
 
     for (const card of deck) {
       const slot = findNextEmptySlot(work.root);
@@ -980,12 +1065,13 @@
       simulateClick(slot);
       await sleep(500);
 
-      const cardRoot = findOwnedCardRootForSelection(card);
+      const cardRoot = findOwnedCardRootForSelectionEx(card, { excludeRoots: usedRoots });
       if (!cardRoot) {
         console.warn('[CPCC] owned card root not found', card);
         setStatus(`${workName}: カードが見つかりません ${card.name}`);
         continue;
       }
+      usedRoots.add(cardRoot);
 
       const target = findClickableCardTarget(cardRoot);
       if (!target) {
@@ -1083,8 +1169,31 @@
     return imgs;
   }
 
+  function findFilledWorkCardRoots(workRoot) {
+    const cardsContainer = workRoot.querySelector('.base-cards, .card-container.base-cards');
+    if (!cardsContainer) return [];
+
+    return [...cardsContainer.querySelectorAll('.card')]
+      .filter(card => !card.classList.contains('card-empty-slot') && !!findMainCardImage(card));
+  }
+
   function findOwnedCardRootForSelection(card) {
-    const roots = findOwnedCardRoots();
+    return findOwnedCardRootForSelectionEx(card);
+  }
+
+  function findOwnedCardRootForSelectionEx(card, opts = {}) {
+    const excludeRoots = opts.excludeRoots || new Set();
+    const rememberedRoots = [
+      card?.root,
+      state.cards.find(c => c.id === card.id)?.root,
+    ].filter(Boolean);
+
+    for (const root of rememberedRoots) {
+      if (excludeRoots.has(root)) continue;
+      if (isMatchingCardRoot(root, card)) return root;
+    }
+
+    const roots = findOwnedCardRoots().filter(root => !excludeRoots.has(root));
 
     // まずは厳密一致
     let exact = roots.find(root => {
@@ -1111,15 +1220,27 @@
     }) || null;
   }
 
+  function isMatchingCardRoot(root, card) {
+    if (!root?.isConnected) return false;
+    const parsed = parseCardSignature(root);
+    if (!parsed) return false;
+
+    return parsed.name === card.name &&
+      parsed.power === card.power &&
+      parsed.club === card.club &&
+      parsed.rarity === card.rarity;
+  }
+
   function parseCardSignature(root) {
     const text = normalizeSpace(root.innerText || root.textContent || '');
     const img = findMainCardImage(root);
-    if (!img) return null;
-
-    const name = (img.getAttribute('alt') || '').trim();
-    const powerMatch = text.match(/Power\s*(\d+)/i);
+    const nameEl = root.querySelector('.card-name');
+    const powerEl = root.querySelector('.base-pwr');
+    const name = normalizeSpace(nameEl?.textContent || '') || (img?.getAttribute('alt') || '').trim();
+    const powerText = normalizeSpace(powerEl?.textContent || '');
+    const powerMatch = powerText.match(/(\d+)/) || text.match(/Power\s*(\d+)/i);
     const rarity = parseRarity(root) || 'N';
-    const club = parseClub(text);
+    const club = parseClubFromRoot(root, text);
 
     return {
       name,
@@ -1236,13 +1357,16 @@
   }
 
   function highlightDeck(deck, workName) {
+    const usedRoots = new Set();
+
     for (const card of deck) {
-      const root = findOwnedCardRootForSelection(card);
+      const root = findOwnedCardRootForSelectionEx(card, { excludeRoots: usedRoots });
       if (!root) {
         console.warn('[CPCC] highlight target not found', workName, card);
         continue;
       }
 
+      usedRoots.add(root);
       root.classList.add('cpcc-highlight-card');
       root.setAttribute('data-cpcc-work', workName);
     }
