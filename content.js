@@ -15,6 +15,7 @@
     supporterKeep: 20,
     eachClubKeep: 6,
     topDeckOptionsPerWork: 120, // 各ワークで保持する候補デッキ数
+    autoStepDelay: 300,
     autoClickDelay: 220,
     autoClickDelayLong: 420,
   };
@@ -1111,6 +1112,12 @@
 
     setStatus(`${workName}: ${deck.length} 枚をセット中...`);
     await activateWorkBase(workName);
+    const cleared = await waitForWorkCountAtMost(workName, 0, 4000);
+    if (!cleared) {
+      console.warn('[CPCC] clear phase did not finish', workName);
+      setStatus(`${workName}: 既存カードの解除が完了していません`);
+      return;
+    }
 
     for (const card of deck) {
       const currentRoot = findWorkRoot(workName);
@@ -1140,7 +1147,8 @@
       console.log('[CPCC] click card', workName, card.name, target);
       simulateClick(target);
       highlightElement(target, 'red');
-      const changed = await waitForWorkCount(workName, countBefore + 1, 2500);
+      await sleep(CONFIG.autoStepDelay);
+      const changed = await waitForWorkCountAtLeast(workName, countBefore + 1, 2500);
       if (!changed) {
         console.warn('[CPCC] count did not increase', workName, card);
         await sleep(CONFIG.autoClickDelayLong);
@@ -1176,18 +1184,23 @@
       const cardTargets = rootNow ? findFilledWorkCardRoots(rootNow) : [];
       if (!cardTargets.length) break;
 
-      for (const target of cardTargets) {
+      const target = cardTargets[cardTargets.length - 1];
+      if (target) {
         simulateClick(target);
         highlightElement(target, 'orange');
-        const changed = await waitForWorkCount(workName, Math.max(0, countBefore - 1), 2500);
+        await sleep(CONFIG.autoStepDelay);
+        const changed = await waitForWorkCountLessThan(workName, countBefore, 4000);
         if (!changed) {
+          console.warn('[CPCC] clear click did not reduce count', workName, countBefore);
           await sleep(CONFIG.autoClickDelayLong);
         }
-        break;
       }
+
       const countNow = parseCurrentCount(findWorkRoot(workName));
       if (countNow === 0) break;
     }
+
+    await waitForWorkCountAtMost(workName, 0, 4000);
   }
 
   async function activateWorkBase(workName) {
@@ -1206,6 +1219,27 @@
     return waitUntil(() => {
       const root = findWorkRoot(workName);
       return !!root && parseCurrentCount(root) === expectedCount;
+    }, timeoutMs);
+  }
+
+  async function waitForWorkCountAtMost(workName, maxCount, timeoutMs = 2000) {
+    return waitUntil(() => {
+      const root = findWorkRoot(workName);
+      return !!root && parseCurrentCount(root) <= maxCount;
+    }, timeoutMs);
+  }
+
+  async function waitForWorkCountAtLeast(workName, minCount, timeoutMs = 2000) {
+    return waitUntil(() => {
+      const root = findWorkRoot(workName);
+      return !!root && parseCurrentCount(root) >= minCount;
+    }, timeoutMs);
+  }
+
+  async function waitForWorkCountLessThan(workName, previousCount, timeoutMs = 2000) {
+    return waitUntil(() => {
+      const root = findWorkRoot(workName);
+      return !!root && parseCurrentCount(root) < previousCount;
     }, timeoutMs);
   }
 
@@ -1371,27 +1405,22 @@
       el.scrollIntoView({ block: 'center', inline: 'center', behavior: 'instant' });
     } catch { }
 
+    if (typeof el.click === 'function') {
+      el.click();
+      return true;
+    }
+
     const rect = safeRect(el);
     const clientX = rect.left + rect.width / 2;
     const clientY = rect.top + rect.height / 2;
-
-    const events = ['pointerdown', 'mousedown', 'pointerup', 'mouseup', 'click'];
-
-    for (const type of events) {
-      const ev = new MouseEvent(type, {
-        bubbles: true,
-        cancelable: true,
-        view: window,
-        clientX,
-        clientY,
-      });
-      el.dispatchEvent(ev);
-    }
-
-    // ネイティブ click も呼ぶ
-    if (typeof el.click === 'function') {
-      el.click();
-    }
+    const ev = new MouseEvent('click', {
+      bubbles: true,
+      cancelable: true,
+      view: window,
+      clientX,
+      clientY,
+    });
+    el.dispatchEvent(ev);
 
     return true;
   }
