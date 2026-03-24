@@ -10,13 +10,8 @@
 
   // 候補数が多すぎると重いので、必要に応じて調整
   const CONFIG = {
-    topPowerKeep: 30,
-    sameClubKeep: 28,
-    supporterKeep: 20,
-    eachClubKeep: 6,
     topDeckOptionsPerWork: 120, // 各ワークで保持する候補デッキ数
-    maxCandidatesPerWork: 18,
-    optimizeYieldEvery: 400,
+    optimizeYieldEvery: 250,
     autoStepDelay: 300,
     autoClickDelay: 220,
     autoClickDelayLong: 420,
@@ -82,9 +77,10 @@
   }
 
   function reloadAll() {
+    const allOwnedRoots = findOwnedCardRoots();
     state.cards = parseOwnedCardsRobust();
     state.works = detectWorks();
-    setStatus(`カード ${state.cards.length} 枚 / ワーク ${state.works.filter(w => w.unlocked).length} 件を読み込みました`);
+    setStatus(`総所持 ${allOwnedRoots.length} 枚 / 未使用 ${state.cards.length} 枚 / ワーク ${state.works.filter(w => w.unlocked).length} 件を読み込みました`);
     setResultHtml(renderLoadedPreview());
     console.log('[CPCC] cards', state.cards);
     console.log('[CPCC] works', state.works);
@@ -716,89 +712,73 @@
   }
 
   function estimateCardValue(card, rule) {
-    let score = applyWorkBase(card, rule);
+    const baseScore = applyWorkBase(card, rule);
+    let score = baseScore;
+    let ownPositive = 0;
+    let ownNegative = 0;
+    let relevantPositive = 0;
+    let relevantNegative = 0;
+    let otherPositive = 0;
+    let otherNegative = 0;
+
+    const targetClubs = new Set(rule.clubs || []);
 
     for (const eff of card.effects) {
-      const plus = Math.max(0, eff.value);
-
-      if (rule.type === 'clubMultiplier' || rule.type === 'onlyClub') {
-        if (rule.clubs.includes(eff.club)) score += plus * 4;
-      } else if (rule.type === 'rarityMultiplier') {
-        score += plus * 2.2;
-      } else if (rule.type === 'minPower') {
-        score += plus * 2.5;
+      if (eff.value >= 0) {
+        if (eff.club === card.club) ownPositive += eff.value;
+        else if (targetClubs.has(eff.club)) relevantPositive += eff.value;
+        else otherPositive += eff.value;
       } else {
-        score += plus * 2;
+        if (eff.club === card.club) ownNegative += Math.abs(eff.value);
+        else if (targetClubs.has(eff.club)) relevantNegative += Math.abs(eff.value);
+        else otherNegative += Math.abs(eff.value);
       }
+    }
+
+    // 上級者向けの判断:
+    // 自部活への加算が強いカードは、単純な素パワー以上に伸びやすい
+    score += ownPositive * 9;
+    score += relevantPositive * 5;
+    score += otherPositive * 1.5;
+    score -= ownNegative * 7;
+    score -= relevantNegative * 4;
+    score -= otherNegative * 1.2;
+
+    if ((rule.type === 'clubMultiplier' || rule.type === 'onlyClub') && targetClubs.has(card.club)) {
+      score += ownPositive * 4;
+      score += baseScore * 0.35;
+    }
+
+    if (rule.type === 'rarityMultiplier' && rule.rarities?.includes(card.rarity)) {
+      score += ownPositive * 2;
+      score += relevantPositive * 1.5;
+    }
+
+    if (rule.type === 'minPower') {
+      score += ownPositive * 2.5;
+    }
+
+    if (card.effects.length === 0) {
+      score -= Math.max(80, baseScore * 0.35);
+    } else if ((ownPositive + relevantPositive + otherPositive) === 0) {
+      score -= Math.max(120, baseScore * 0.45);
+    }
+
+    if (ownPositive >= 100) {
+      score += baseScore * (ownPositive / 100) * 0.45;
     }
 
     return score;
   }
 
   function buildCandidates(cards, rule) {
-    const set = new Set();
-
-    [...cards]
-      .sort((a, b) => b.power - a.power)
-      .slice(0, CONFIG.topPowerKeep)
-      .forEach(c => set.add(c));
-
-    if (rule.type === 'clubMultiplier' || rule.type === 'onlyClub') {
-      const targetClubs = new Set(rule.clubs);
-
-      cards
-        .filter(c => targetClubs.has(c.club))
-        .sort((a, b) => b.power - a.power)
-        .slice(0, CONFIG.sameClubKeep)
-        .forEach(c => set.add(c));
-
-      cards
-        .filter(c => c.effects.some(e => targetClubs.has(e.club) && e.value !== 0))
-        .sort((a, b) => sumEffectForTargets(b, targetClubs) - sumEffectForTargets(a, targetClubs))
-        .slice(0, CONFIG.supporterKeep)
-        .forEach(c => set.add(c));
-    } else if (rule.type === 'rarityMultiplier') {
-      cards
-        .filter(c => c.rarity === 'N')
-        .sort((a, b) => b.power - a.power)
-        .slice(0, CONFIG.sameClubKeep)
-        .forEach(c => set.add(c));
-
-      cards
-        .filter(c => c.effects.some(e => e.value > 0))
-        .sort((a, b) => sumPositiveEffects(b) - sumPositiveEffects(a))
-        .slice(0, CONFIG.supporterKeep)
-        .forEach(c => set.add(c));
-    } else if (rule.type === 'minPower') {
-      cards
-        .filter(c => c.power <= rule.minPower)
-        .sort((a, b) => sumPositiveEffects(b) - sumPositiveEffects(a))
-        .slice(0, CONFIG.supporterKeep)
-        .forEach(c => set.add(c));
-
-      cards
-        .filter(c => c.effects.some(e => e.value > 0))
-        .sort((a, b) => sumPositiveEffects(b) - sumPositiveEffects(a))
-        .slice(0, CONFIG.supporterKeep)
-        .forEach(c => set.add(c));
-    }
-
-    for (const club of CLUBS) {
-      cards
-        .filter(c => c.club === club)
-        .sort((a, b) => b.power - a.power)
-        .slice(0, CONFIG.eachClubKeep)
-        .forEach(c => set.add(c));
-    }
-
-    return [...set];
+    return [...cards];
   }
 
   async function searchTopDeckOptions(cards, workName, maxKeep = CONFIG.topDeckOptionsPerWork) {
     const rule = WORK_RULES[workName];
     const candidates = buildCandidates(cards, rule)
-      .sort((a, b) => estimateCardValue(b, rule) - estimateCardValue(a, rule))
-      .slice(0, CONFIG.maxCandidatesPerWork);
+      .sort((a, b) => estimateCardValue(b, rule) - estimateCardValue(a, rule));
 
     const bestOptions = [];
     let explored = 0;
@@ -1025,14 +1005,12 @@
       byWork[workName] = res;
 
       setResultHtml(renderGlobalPlan(buildMacroGlobalPlan(byWork, unlockedWorks)));
-      setStatus(`${workName}: 自動セットしています...`);
-      await autoSetWorkDeck(workName, res.deck);
-      reloadAll();
+      setStatus(`${workName}: プランを更新しました`);
     }
 
     state.globalPlan = buildMacroGlobalPlan(byWork, unlockedWorks);
     setResultHtml(renderGlobalPlan(state.globalPlan));
-    setStatus('全ワーク最適化マクロが完了しました');
+    setStatus('全ワーク最適化が完了しました。必要なら「この全プランを自動セット」を押してください');
   }
 
   function buildMacroGlobalPlan(byWork, unlockedWorks) {
@@ -1157,18 +1135,10 @@
   async function autoSetGlobalPlan(byWork) {
     setStatus('全プラン自動セットを開始します...');
 
-    // 先に対象ワークを空にする
     for (const workName of WORK_ORDER) {
       const item = byWork[workName];
       if (!item) continue;
-      await clearWorkDeck(workName);
-    }
-
-    // 順番にセット
-    for (const workName of WORK_ORDER) {
-      const item = byWork[workName];
-      if (!item) continue;
-      await autoSetWorkDeck(workName, item.deck, { skipClear: true });
+      await autoSetWorkDeck(workName, item.deck);
     }
 
     setStatus('全プランの自動セットが完了しました');
@@ -1181,25 +1151,35 @@
       return;
     }
 
-    if (!opts.skipClear) {
-      await clearWorkDeck(workName);
-    }
+    const targetDeck = deck || [];
+    const currentEntries = getCurrentWorkCardEntries(workName);
+    const diff = diffWorkDeck(currentEntries, targetDeck);
 
-    if (!deck?.length) {
-      setStatus(`${workName}: セット対象カードなし`);
+    if (!diff.toRemove.length && !diff.toAdd.length) {
+      setStatus(`${workName}: 差分がないため再セットを省略しました`);
       return;
     }
 
-    setStatus(`${workName}: ${deck.length} 枚をセット中...`);
+    setStatus(`${workName}: ${diff.toRemove.length} 枚解除 / ${diff.toAdd.length} 枚設定します`);
     await activateWorkBase(workName);
-    const cleared = await waitForWorkCountAtMost(workName, 0, 4000);
-    if (!cleared) {
-      console.warn('[CPCC] clear phase did not finish', workName);
-      setStatus(`${workName}: 既存カードの解除が完了していません`);
-      return;
+
+    for (const entry of diff.toRemove) {
+      await activateWorkBase(workName);
+      const rootNow = findWorkRoot(workName);
+      const countBefore = rootNow ? parseCurrentCount(rootNow) : 0;
+      if (countBefore <= 0) break;
+
+      simulateClick(entry.root);
+      highlightElement(entry.root, 'orange');
+      await sleep(CONFIG.autoStepDelay);
+      const changed = await waitForWorkCountLessThan(workName, countBefore, 4000);
+      if (!changed) {
+        console.warn('[CPCC] remove click did not reduce count', workName, entry.card);
+        await sleep(CONFIG.autoClickDelayLong);
+      }
     }
 
-    for (const card of deck) {
+    for (const card of diff.toAdd) {
       const currentRoot = findWorkRoot(workName);
       const countBefore = currentRoot ? parseCurrentCount(currentRoot) : 0;
       if (countBefore >= 5) {
@@ -1378,6 +1358,73 @@
 
     return [...cardsContainer.querySelectorAll('.card')]
       .filter(card => !card.classList.contains('card-empty-slot') && !!findMainCardImage(card));
+  }
+
+  function getCurrentWorkCardEntries(workName) {
+    const root = findWorkRoot(workName);
+    if (!root) return [];
+
+    return findFilledWorkCardRoots(root)
+      .map((cardRoot, index) => {
+        const card = parseCardFromRoot(cardRoot, `current-${workName}-${index}`);
+        if (!card) return null;
+        return {
+          root: cardRoot,
+          card,
+          key: getCardSignatureKey(card),
+        };
+      })
+      .filter(Boolean);
+  }
+
+  function diffWorkDeck(currentEntries, targetDeck) {
+    const targetCounts = new Map();
+    for (const card of targetDeck) {
+      const key = getCardSignatureKey(card);
+      targetCounts.set(key, (targetCounts.get(key) || 0) + 1);
+    }
+
+    const keptCounts = new Map();
+    const toRemove = [];
+
+    for (const entry of currentEntries) {
+      const keepCount = keptCounts.get(entry.key) || 0;
+      const targetCount = targetCounts.get(entry.key) || 0;
+
+      if (keepCount < targetCount) {
+        keptCounts.set(entry.key, keepCount + 1);
+      } else {
+        toRemove.push(entry);
+      }
+    }
+
+    const currentKeptCounts = new Map();
+    for (const entry of currentEntries) {
+      const currentCount = currentKeptCounts.get(entry.key) || 0;
+      const targetCount = targetCounts.get(entry.key) || 0;
+      if (currentCount < targetCount) {
+        currentKeptCounts.set(entry.key, currentCount + 1);
+      }
+    }
+
+    const addCounts = new Map();
+    for (const [key, targetCount] of targetCounts.entries()) {
+      const currentCount = currentKeptCounts.get(key) || 0;
+      if (targetCount > currentCount) {
+        addCounts.set(key, targetCount - currentCount);
+      }
+    }
+
+    const toAdd = [];
+    for (const card of targetDeck) {
+      const key = getCardSignatureKey(card);
+      const remaining = addCounts.get(key) || 0;
+      if (remaining <= 0) continue;
+      toAdd.push(card);
+      addCounts.set(key, remaining - 1);
+    }
+
+    return { toRemove, toAdd };
   }
 
   function findOwnedCardRootForSelection(card) {
