@@ -82,8 +82,6 @@
     state.works = detectWorks();
     setStatus(`総所持 ${allOwnedRoots.length} 枚 / 未使用 ${state.cards.length} 枚 / ワーク ${state.works.filter(w => w.unlocked).length} 件を読み込みました`);
     setResultHtml(renderLoadedPreview());
-    console.log('[CPCC] cards', state.cards);
-    console.log('[CPCC] works', state.works);
   }
 
   // =========================
@@ -218,7 +216,8 @@
     document.querySelectorAll('[data-cpcc-action="set-work"]').forEach(btn => {
       btn.onclick = async () => {
         const workName = btn.dataset.work;
-        const plan = state.singleResults?.[workName] || state.globalPlan?.byWork?.[workName];
+        const single = state.singleResults?.[workName];
+        const plan = single || state.globalPlan?.byWork?.[workName];
         if (!plan) {
           alert('先に対象ワークの最適化を実行してください');
           return;
@@ -252,7 +251,8 @@
     document.querySelectorAll('[data-cpcc-action="highlight-work"]').forEach(btn => {
       btn.onclick = () => {
         const workName = btn.dataset.work;
-        const plan = state.globalPlan?.byWork?.[workName] || state.singleResults?.[workName];
+        const single = state.singleResults?.[workName];
+        const plan = state.globalPlan?.byWork?.[workName] || single;
         if (!plan?.deck?.length) {
           alert('ハイライト対象のデッキがありません');
           return;
@@ -286,11 +286,19 @@
       el.onclick = () => {
         const cardId = el.dataset.cpccCardId;
         const cardName = el.dataset.cpccCardName;
+        const occurrence = Number(el.dataset.cpccCardOccurrence || '1');
 
         const card = state.cards.find(c => c.id === cardId) || state.cards.find(c => c.name === cardName);
-        if (!card) return;
+        const target = findOwnedCardRootByOccurrence(card || {
+          id: cardId,
+          name: cardName,
+          power: Number(el.dataset.cpccCardPower || '0'),
+          club: el.dataset.cpccCardClub || '',
+          rarity: el.dataset.cpccCardRarity || '',
+        }, occurrence);
+        if (!target) return;
 
-        jumpToOwnedCard(card, el);
+        jumpToOwnedCardRoot(target, cardName, el);
       };
     });
   }
@@ -299,6 +307,15 @@
     const target = findOwnedCardRootForSelection(card);
     if (!target) {
       setStatus(`カード位置が見つかりません: ${card.name}`);
+      return;
+    }
+
+    jumpToOwnedCardRoot(target, card.name, resultEl);
+  }
+
+  function jumpToOwnedCardRoot(target, cardName, resultEl = null) {
+    if (!target) {
+      setStatus(`カード位置が見つかりません: ${cardName}`);
       return;
     }
 
@@ -320,7 +337,7 @@
       setTimeout(() => resultEl.classList.remove('is-active-jump'), 1200);
     }
 
-    setStatus(`カード位置へ移動: ${card.name}`);
+    setStatus(`カード位置へ移動: ${cardName}`);
   }
 
   function flashJumpTarget(el) {
@@ -657,31 +674,35 @@
   }
 
   function applyWorkBase(card, rule) {
-    if (!rule) return card.power;
+    return applyWorkPower(card.power, card, rule);
+  }
+
+  function applyWorkPower(power, card, rule) {
+    if (!rule) return power;
 
     if (rule.type === 'minPower') {
-      return Math.max(card.power, rule.minPower);
+      return Math.max(power, rule.minPower);
     }
 
     if (rule.type === 'rarityMultiplier') {
       return rule.rarities.includes(card.rarity)
-        ? card.power * rule.multiplier
-        : card.power;
+        ? power * rule.multiplier
+        : power;
     }
 
     if (rule.type === 'clubMultiplier') {
       return rule.clubs.includes(card.club)
-        ? card.power * rule.multiplier
-        : card.power;
+        ? power * rule.multiplier
+        : power;
     }
 
     if (rule.type === 'onlyClub') {
       return rule.clubs.includes(card.club)
-        ? card.power
+        ? power
         : 0;
     }
 
-    return card.power;
+    return power;
   }
 
   function evaluateDeck(deck, rule) {
@@ -696,13 +717,19 @@
     let total = 0;
 
     for (const card of deck) {
-      const baseAfterWork = applyWorkBase(card, rule);
       const clubBonus = buffByClub.get(card.club) || 0;
-      const finalPower = roundPower(baseAfterWork * (1 + clubBonus / 100));
+      const basePower = card.power;
+      const bonusPower = Math.floor(basePower * (clubBonus / 100));
+      const afterClubBonus = Math.max(0, basePower + bonusPower);
+      const finalPower = roundPower(applyWorkPower(afterClubBonus, card, rule));
+      const fieldPower = finalPower - afterClubBonus;
 
       byCard[card.id] = {
         bonusPercent: clubBonus,
-        baseAfterWork,
+        basePower,
+        bonusPower,
+        afterClubBonus,
+        fieldPower,
         finalPower,
       };
       total += finalPower;
@@ -990,19 +1017,20 @@
 
     const unlockedWorks = WORK_ORDER.filter(name => state.works.find(w => w.name === name && w.unlocked));
     const byWork = {};
+    let remainingCards = [...state.cards];
 
     for (const workName of unlockedWorks) {
-      reloadAll();
-
+      const currentWorkCards = getCardsCurrentlyInWork(workName);
       const cardsForWork = [
-        ...state.cards,
-        ...getCardsCurrentlyInWork(workName),
+        ...remainingCards,
+        ...currentWorkCards,
       ];
 
       setStatus(`${workName}: 単体最適化を計算中...`);
       const res = await findBestSingleWork(cardsForWork, workName);
       state.singleResults[workName] = res;
       byWork[workName] = res;
+      remainingCards = removeSelectedCards(cardsForWork, res.deck);
 
       setResultHtml(renderGlobalPlan(buildMacroGlobalPlan(byWork, unlockedWorks)));
       setStatus(`${workName}: プランを更新しました`);
@@ -1048,6 +1076,11 @@
     };
   }
 
+  function removeSelectedCards(pool, selectedDeck) {
+    const selectedIds = new Set(selectedDeck.map(card => card.id));
+    return pool.filter(card => !selectedIds.has(card.id));
+  }
+
   function renderSingleWorkResult(workName, res) {
     return `
       <div class="cpcc-card">
@@ -1059,7 +1092,7 @@
           <button class="green" data-cpcc-action="highlight-work" data-work="${escapeHtml(workName)}">このデッキをハイライト</button>
         </div>
       </div>
-      ${renderDeckCards(res.deck, res.detail)}
+      ${renderDeckCards(res.deck || [], res.detail || { byCard: {} })}
     `;
   }
 
@@ -1110,19 +1143,31 @@
       return `<div class="cpcc-card"><span class="cpcc-muted">カードなし</span></div>`;
     }
 
+    const seenKeys = new Map();
+
     return deck.map(c => {
-      const d = detail?.byCard?.[c.id] || { bonusPercent: 0, baseAfterWork: c.power, finalPower: c.power };
+      const d = detail?.byCard?.[c.id] || { bonusPercent: 0, basePower: c.power, bonusPower: 0, afterClubBonus: c.power, fieldPower: 0, finalPower: c.power };
+      const key = getCardSignatureKey(c);
+      const occurrence = (seenKeys.get(key) || 0) + 1;
+      seenKeys.set(key, occurrence);
+      const bonusPowerText = d.bonusPower > 0 ? `(+${formatNum(d.bonusPower)})` : (d.bonusPower < 0 ? `(${formatNum(d.bonusPower)})` : '(0)');
+      const fieldPowerText = d.fieldPower > 0 ? `(+${formatNum(d.fieldPower)})` : (d.fieldPower < 0 ? `(${formatNum(d.fieldPower)})` : '(0)');
 
       return `
       <div
         class="cpcc-card cpcc-result-card"
         data-cpcc-card-id="${escapeHtml(c.id)}"
         data-cpcc-card-name="${escapeHtml(c.name)}"
+        data-cpcc-card-power="${escapeHtml(String(c.power))}"
+        data-cpcc-card-club="${escapeHtml(c.club)}"
+        data-cpcc-card-rarity="${escapeHtml(c.rarity)}"
+        data-cpcc-card-occurrence="${occurrence}"
         title="クリックでカード位置へスクロール"
       >
         <div class="cpcc-title">${escapeHtml(c.name)} <span class="cpcc-sub">[${escapeHtml(c.rarity)}]</span></div>
         <div>部活: ${escapeHtml(c.club)} / 基礎Power: ${c.power}</div>
-        <div>場効果後: ${formatNum(d.baseAfterWork)} / 部活補正: ${d.bonusPercent > 0 ? '+' : ''}${d.bonusPercent}% / 最終: ${formatNum(d.finalPower)}</div>
+        <div>基礎Power: ${formatNum(d.basePower)} / 部活補正: ${d.bonusPercent > 0 ? '+' : ''}${d.bonusPercent}% ${bonusPowerText}</div>
+        <div>場効果: ${fieldPowerText} / 場効果後: ${formatNum(d.finalPower)}</div>
       </div>
     `;
     }).join('');
@@ -1174,7 +1219,6 @@
       await sleep(CONFIG.autoStepDelay);
       const changed = await waitForWorkCountLessThan(workName, countBefore, 4000);
       if (!changed) {
-        console.warn('[CPCC] remove click did not reduce count', workName, entry.card);
         await sleep(CONFIG.autoClickDelayLong);
       }
     }
@@ -1183,7 +1227,6 @@
       const currentRoot = findWorkRoot(workName);
       const countBefore = currentRoot ? parseCurrentCount(currentRoot) : 0;
       if (countBefore >= 5) {
-        console.warn('[CPCC] deck already full', workName, countBefore);
         setStatus(`${workName}: 既に5枚入っています`);
         break;
       }
@@ -1192,25 +1235,21 @@
 
       const cardRoot = findOwnedCardRootForSelectionEx(card, { excludeInDeck: true });
       if (!cardRoot) {
-        console.warn('[CPCC] owned card root not found', card);
         setStatus(`${workName}: カードが見つかりません ${card.name}`);
         continue;
       }
 
       const target = findClickableCardTarget(cardRoot);
       if (!target) {
-        console.warn('[CPCC] clickable target not found', card);
         setStatus(`${workName}: クリック対象が見つかりません ${card.name}`);
         continue;
       }
 
-      console.log('[CPCC] click card', workName, card.name, target);
       simulateClick(target);
       highlightElement(target, 'red');
       await sleep(CONFIG.autoStepDelay);
       const changed = await waitForWorkCountAtLeast(workName, countBefore + 1, 2500);
       if (!changed) {
-        console.warn('[CPCC] count did not increase', workName, card);
         await sleep(CONFIG.autoClickDelayLong);
       }
     }
@@ -1251,7 +1290,6 @@
         await sleep(CONFIG.autoStepDelay);
         const changed = await waitForWorkCountLessThan(workName, countBefore, 4000);
         if (!changed) {
-          console.warn('[CPCC] clear click did not reduce count', workName, countBefore);
           await sleep(CONFIG.autoClickDelayLong);
         }
       }
@@ -1429,6 +1467,19 @@
 
   function findOwnedCardRootForSelection(card) {
     return findOwnedCardRootForSelectionEx(card);
+  }
+
+  function findOwnedCardRootByOccurrence(card, occurrence = 1) {
+    const roots = findOwnedCardRoots().filter(root => {
+      const parsed = parseCardSignature(root);
+      return parsed &&
+        parsed.name === card.name &&
+        parsed.power === card.power &&
+        parsed.club === card.club &&
+        parsed.rarity === card.rarity;
+    });
+
+    return roots[Math.max(0, occurrence - 1)] || roots[0] || null;
   }
 
   function findOwnedCardRootForSelectionEx(card, opts = {}) {
@@ -1625,7 +1676,6 @@
     for (const card of deck) {
       const root = findOwnedCardRootForSelectionEx(card, { excludeRoots: usedRoots });
       if (!root) {
-        console.warn('[CPCC] highlight target not found', workName, card);
         continue;
       }
 
