@@ -12,7 +12,7 @@
   const CONFIG = {
     topDeckOptionsPerWork: 120, // 各ワークで保持する候補デッキ数
     optimizeYieldEvery: 250,
-    storageCacheVersion: 3,
+    storageCacheVersion: 4,
     storageCacheMaxEntries: 300,
     prefilterOverallKeep: 260,
     prefilterPerClubKeep: 32,
@@ -1373,16 +1373,14 @@
 
     while (improved) {
       improved = false;
-      const weakCards = rankWeakCards(bestOption.deck, rule)
-        .slice(0, 3)
-        .map(item => item.index);
+      const weakCards = rankWeakCards(bestOption.deck, rule).slice(0, 3);
       const deckIds = new Set(bestOption.deck.map(card => card.id));
       const outsideCards = [...cards]
         .filter(card => !deckIds.has(card.id) && isCardRelevantToFocus(card, focusClub, rule))
         .sort((a, b) => estimateCardForFocus(b, focusClub, rule, optionScan) - estimateCardForFocus(a, focusClub, rule, optionScan))
         .slice(0, Math.max(10, CONFIG.currentDeckSwapPoolKeep));
 
-      for (const index of weakCards) {
+      for (const { index } of weakCards) {
         for (const candidate of outsideCards) {
           const nextDeck = bestOption.deck.map((card, deckIndex) => deckIndex === index ? candidate : card);
           if (new Set(nextDeck.map(card => card.id)).size !== nextDeck.length) continue;
@@ -1406,6 +1404,52 @@
             improved = true;
             break;
           }
+        }
+        if (improved) break;
+      }
+
+      if (improved) continue;
+
+      const pairOutsideCards = outsideCards.slice(0, Math.max(6, CONFIG.currentDeckPairSwapKeep));
+      for (let a = 0; a < weakCards.length; a++) {
+        for (let b = a + 1; b < weakCards.length; b++) {
+          const firstIndex = weakCards[a].index;
+          const secondIndex = weakCards[b].index;
+
+          for (let i = 0; i < pairOutsideCards.length; i++) {
+            for (let j = i + 1; j < pairOutsideCards.length; j++) {
+              const firstCandidate = pairOutsideCards[i];
+              const secondCandidate = pairOutsideCards[j];
+              const nextDeck = bestOption.deck.map((card, deckIndex) => {
+                if (deckIndex === firstIndex) return firstCandidate;
+                if (deckIndex === secondIndex) return secondCandidate;
+                return card;
+              });
+              if (new Set(nextDeck.map(card => card.id)).size !== nextDeck.length) continue;
+
+              const key = buildDeckKey(nextDeck);
+              if (seen.has(key)) continue;
+              seen.add(key);
+              explored++;
+
+              const detail = evaluateDeck(nextDeck, rule);
+              if (detail.total > bestOption.score) {
+                bestOption = {
+                  workName,
+                  deck: nextDeck,
+                  score: detail.total,
+                  detail,
+                  key,
+                  exploredAt: explored,
+                  focusClub,
+                };
+                improved = true;
+                break;
+              }
+            }
+            if (improved) break;
+          }
+          if (improved) break;
         }
         if (improved) break;
       }
@@ -1862,7 +1906,15 @@
     const targetWorks = getOrderedUnlockedWorks(state.works);
 
     for (const workName of targetWorks) {
-      await clearWorkDeck(workName);
+      const item = byWork[workName];
+      const targetDeck = item?.deck || [];
+      const currentEntries = getCurrentWorkCardEntries(workName);
+      const diff = diffWorkDeck(currentEntries, targetDeck);
+      if (!diff.toRemove.length) continue;
+
+      setStatus(`${workName}: ${diff.toRemove.length} 枚を差分解除します...`);
+      await activateWorkBase(workName);
+      await removeWorkEntries(workName, diff.toRemove);
     }
 
     syncStateSilently();
@@ -1870,7 +1922,7 @@
     for (const workName of targetWorks) {
       const item = byWork[workName];
       if (!item?.deck?.length) continue;
-      await autoSetWorkDeck(workName, item.deck);
+      await autoSetWorkDeck(workName, item.deck, { skipRemoval: true });
     }
 
     setStatus('全プランの自動セットが完了しました');
