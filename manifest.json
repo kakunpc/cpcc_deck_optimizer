@@ -1,7 +1,7 @@
 {
   "manifest_version": 3,
   "name": "CPCC Deck Optimizer",
-  "version": "0.0.2",
+  "version": "0.0.3",
   "description": "からぱり☆カードコレクション! 用の最適デッキ計算補助",
   "content_scripts": [
     {

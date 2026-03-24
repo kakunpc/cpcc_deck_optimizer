@@ -1,6 +1,24 @@
 (() => {
   'use strict';
 
+  // =========================
+  // 設定
+  // =========================
+
+  // 実ゲームの丸めにズレを感じたら 'floor' / 'round' / 'ceil' を切り替えてください
+  const POWER_ROUND_MODE = 'floor';
+
+  // 候補数が多すぎると重いので、必要に応じて調整
+  const CONFIG = {
+    topPowerKeep: 30,
+    sameClubKeep: 28,
+    supporterKeep: 20,
+    eachClubKeep: 6,
+    topDeckOptionsPerWork: 120, // 各ワークで保持する候補デッキ数
+    autoClickDelay: 220,
+    autoClickDelayLong: 420,
+  };
+
   const CLUBS = [
     'びしょく・りょうり部',
     'ぱーてぃくるらい部',
@@ -25,24 +43,45 @@
   ].sort((a, b) => b.length - a.length);
 
   const WORK_RULES = {
-    'たまり場': { type: 'none' }, // ユーザー要望により場効果は無視
-    '生徒会室': { type: 'none' }, // ユーザー要望により場効果は無視
+    'たまり場': { type: 'minPower', minPower: 100 },
+    '生徒会室': { type: 'rarityMultiplier', rarities: ['N'], multiplier: 2 },
     'ダンスステージ': { type: 'clubMultiplier', clubs: ['ダンス部'], multiplier: 2 },
     'カフェバー': { type: 'clubMultiplier', clubs: ['いんしゅ部', 'びしょく・りょうり部'], multiplier: 2 },
     'ポータル': { type: 'clubMultiplier', clubs: ['えんそく部'], multiplier: 3 },
     '作業部屋': { type: 'onlyClub', clubs: ['さぎょう部'] },
   };
 
+  const WORK_ORDER = Object.keys(WORK_RULES);
+
   const state = {
     cards: [],
-    lastResults: {},
+    works: [],
+    singleResults: {},
+    globalPlan: null,
   };
 
-  function init() {
+  // =========================
+  // 初期化
+  // =========================
+
+  function boot() {
     if (document.getElementById('cpcc-optimizer-root')) return;
     createPanel();
-    reloadCards();
+    reloadAll();
   }
+
+  function reloadAll() {
+    state.cards = parseOwnedCardsRobust();
+    state.works = detectWorks();
+    setStatus(`カード ${state.cards.length} 枚 / ワーク ${state.works.filter(w => w.unlocked).length} 件を読み込みました`);
+    setResultHtml(renderLoadedPreview());
+    console.log('[CPCC] cards', state.cards);
+    console.log('[CPCC] works', state.works);
+  }
+
+  // =========================
+  // UI
+  // =========================
 
   function createPanel() {
     const root = document.createElement('div');
@@ -50,18 +89,13 @@
     root.innerHTML = `
       <div class="cpcc-head">CPCC Deck Optimizer</div>
       <div class="cpcc-actions">
-        <button id="cpcc-reload">カード再読込</button>
-        <button id="cpcc-run-all">全ワーク計算</button>
+        <button id="cpcc-reload">再読込</button>
+        <button id="cpcc-run-all">全ワーク最適化</button>
         <button id="cpcc-close">閉じる</button>
       </div>
       <div id="cpcc-status">初期化中...</div>
       <div class="cpcc-work-buttons">
-        <button data-work="たまり場">たまり場</button>
-        <button data-work="生徒会室">生徒会室</button>
-        <button data-work="ダンスステージ">ダンスステージ</button>
-        <button data-work="カフェバー">カフェバー</button>
-        <button data-work="ポータル">ポータル</button>
-        <button data-work="作業部屋">作業部屋</button>
+        ${WORK_ORDER.map(w => `<button data-work="${escapeHtml(w)}">${escapeHtml(w)}</button>`).join('')}
       </div>
       <div id="cpcc-result"></div>
     `;
@@ -73,7 +107,8 @@
       style.textContent = `
         #cpcc-optimizer-root{
           position:fixed;right:16px;bottom:16px;z-index:999999;
-          width:360px;background:rgba(16,24,39,.95);color:#fff;
+          width:400px;max-height:80vh;overflow:auto;
+          background:rgba(16,24,39,.95);color:#fff;
           border-radius:12px;padding:12px;box-shadow:0 12px 40px rgba(0,0,0,.35);
           font-family:system-ui,-apple-system,BlinkMacSystemFont,"Segoe UI",sans-serif;
           font-size:12px;line-height:1.45;
@@ -83,22 +118,32 @@
           cursor:pointer;background:#2563eb;color:#fff;font-size:12px;
         }
         #cpcc-optimizer-root button:hover{filter:brightness(1.08)}
+        #cpcc-optimizer-root .danger{background:#dc2626}
+        #cpcc-optimizer-root .green{background:#16a34a}
+        #cpcc-optimizer-root .gray{background:#475569}
         .cpcc-head{font-weight:700;font-size:14px;margin-bottom:8px}
         .cpcc-actions,.cpcc-work-buttons{display:flex;flex-wrap:wrap;gap:4px;margin-bottom:8px}
         #cpcc-status{margin-bottom:8px;padding:8px;border-radius:8px;background:rgba(255,255,255,.08)}
-        #cpcc-result{max-height:420px;overflow:auto;padding-right:4px}
-        .cpcc-card{padding:6px 8px;margin:4px 0;border-radius:8px;background:rgba(255,255,255,.08)}
+        #cpcc-result{max-height:none;overflow:visible;padding-right:4px}
+        .cpcc-card{padding:8px 10px;margin:6px 0;border-radius:8px;background:rgba(255,255,255,.08)}
         .cpcc-muted{opacity:.85}
         .cpcc-score{font-weight:700;color:#93c5fd}
+        .cpcc-title{font-weight:700;font-size:13px;margin-bottom:4px}
+        .cpcc-sub{font-size:11px;opacity:.8}
+        .cpcc-btns{display:flex;flex-wrap:wrap;gap:4px;margin-top:8px}
+        .cpcc-hr{height:1px;background:rgba(255,255,255,.12);margin:8px 0}
+        .cpcc-warn{color:#fbbf24}
+        .cpcc-ok{color:#86efac}
       `;
       document.head.appendChild(style);
     }
 
-    root.querySelector('#cpcc-reload').addEventListener('click', reloadCards);
-    root.querySelector('#cpcc-run-all').addEventListener('click', runAllWorks);
+    root.querySelector('#cpcc-reload').addEventListener('click', reloadAll);
+    root.querySelector('#cpcc-run-all').addEventListener('click', runGlobalOptimization);
     root.querySelector('#cpcc-close').addEventListener('click', () => root.remove());
+
     root.querySelectorAll('[data-work]').forEach(btn => {
-      btn.addEventListener('click', () => runOneWork(btn.dataset.work));
+      btn.addEventListener('click', () => runSingleWork(btn.dataset.work));
     });
   }
 
@@ -110,88 +155,75 @@
   function setResultHtml(html) {
     const el = document.getElementById('cpcc-result');
     if (el) el.innerHTML = html;
+    bindResultButtons();
   }
 
-  function reloadCards() {
-    const cards = parseOwnedCardsRobust();
-    state.cards = cards;
-    setStatus(`カード ${cards.length} 枚を読み込みました`);
-    setResultHtml(cards.length ? renderLoadedPreview(cards) : `<div class="cpcc-card">カードを検出できませんでした。DOM構造が変わっている可能性があります。</div>`);
-    console.log('[CPCC] parsed cards:', cards);
+  function bindResultButtons() {
+    document.querySelectorAll('[data-cpcc-action="set-work"]').forEach(btn => {
+      btn.onclick = async () => {
+        const workName = btn.dataset.work;
+        const plan = state.globalPlan?.byWork?.[workName] || state.singleResults?.[workName];
+        if (!plan?.deck) {
+          alert('セット対象のデッキがありません');
+          return;
+        }
+        await autoSetWorkDeck(workName, plan.deck);
+      };
+    });
+
+    document.querySelectorAll('[data-cpcc-action="set-global"]').forEach(btn => {
+      btn.onclick = async () => {
+        if (!state.globalPlan?.byWork) {
+          alert('先に全ワーク最適化を実行してください');
+          return;
+        }
+        await autoSetGlobalPlan(state.globalPlan.byWork);
+      };
+    });
   }
 
-  function renderLoadedPreview(cards) {
-    const preview = cards.slice(0, 8).map(c => {
+  function renderLoadedPreview() {
+    const cards = state.cards;
+    const works = state.works;
+
+    const previewCards = cards.slice(0, 6).map(c => {
       const eff = c.effects.length
         ? c.effects.map(e => `${e.club} ${e.value > 0 ? '+' : ''}${e.value}%`).join(', ')
         : '効果なし';
-      return `<div class="cpcc-card">
-        <div><strong>${escapeHtml(c.name)}</strong> <span class="cpcc-muted">[${escapeHtml(c.rarity)}]</span></div>
-        <div>Power: ${c.power} / 部活: ${escapeHtml(c.club)}</div>
-        <div class="cpcc-muted">${escapeHtml(eff)}</div>
-      </div>`;
-    }).join('');
-
-    return `
-      <div class="cpcc-card">先頭 ${Math.min(cards.length, 8)} 枚を表示中</div>
-      ${preview}
-    `;
-  }
-
-  function runAllWorks() {
-    if (!state.cards.length) reloadCards();
-    if (!state.cards.length) return;
-
-    const works = Object.keys(WORK_RULES);
-    const rows = [];
-
-    for (const work of works) {
-      const res = findBestDeck(state.cards, work);
-      state.lastResults[work] = res;
-      rows.push(renderWorkResult(work, res));
-    }
-
-    setResultHtml(rows.join(''));
-  }
-
-  function runOneWork(workName) {
-    if (!state.cards.length) reloadCards();
-    if (!state.cards.length) return;
-
-    const res = findBestDeck(state.cards, workName);
-    state.lastResults[workName] = res;
-    setResultHtml(renderWorkResult(workName, res));
-  }
-
-  function renderWorkResult(workName, res) {
-    if (!res || !res.deck || !res.deck.length) {
-      return `<div class="cpcc-card"><strong>${escapeHtml(workName)}</strong><br>候補が見つかりませんでした。</div>`;
-    }
-
-    const items = res.deck.map(c => {
-      const bonus = res.detail.byCard[c.id] ?? 0;
       return `
         <div class="cpcc-card">
-          <div><strong>${escapeHtml(c.name)}</strong> <span class="cpcc-muted">[${escapeHtml(c.rarity)}]</span></div>
-          <div>部活: ${escapeHtml(c.club)} / 基礎Power: ${c.power}</div>
-          <div>部活補正合計: ${bonus > 0 ? '+' : ''}${bonus}%</div>
+          <div class="cpcc-title">${escapeHtml(c.name)} <span class="cpcc-sub">[${escapeHtml(c.rarity)}]</span></div>
+          <div>Power: ${c.power} / 部活: ${escapeHtml(c.club)}</div>
+          <div class="cpcc-muted">${escapeHtml(eff)}</div>
+        </div>
+      `;
+    }).join('');
+
+    const workInfo = works.map(w => {
+      return `
+        <div class="cpcc-card">
+          <div class="cpcc-title">${escapeHtml(w.name)}</div>
+          <div>${w.unlocked ? '<span class="cpcc-ok">解放済み</span>' : '<span class="cpcc-warn">未解放</span>'}</div>
+          <div class="cpcc-sub">現在 ${w.currentCount}/5</div>
         </div>
       `;
     }).join('');
 
     return `
       <div class="cpcc-card">
-        <div><strong>${escapeHtml(workName)}</strong></div>
-        <div class="cpcc-score">推定合計Power: ${Math.round(res.score).toLocaleString()}</div>
-        <div class="cpcc-muted">候補数: ${res.candidateCount} / 探索組数: ${res.checked.toLocaleString()}</div>
+        <div class="cpcc-title">読込結果</div>
+        <div>カード: ${cards.length} 枚</div>
+        <div>ワーク: ${works.filter(w => w.unlocked).length} 件解放済み</div>
       </div>
-      ${items}
+      ${previewCards}
+      <div class="cpcc-hr"></div>
+      ${workInfo}
     `;
   }
 
-  // ----------------------------
-  // ここが修正版: 所有カードをかなり強引に拾う
-  // ----------------------------
+  // =========================
+  // カード読み込み
+  // =========================
 
   function parseOwnedCardsRobust() {
     const roots = findOwnedCardRoots();
@@ -202,11 +234,10 @@
       if (card) cards.push(card);
     });
 
-    return dedupeCards(cards);
+    return cards;
   }
 
   function findOwnedCardRoots() {
-    // 所有カードの各カードには ✖ ボタンがあるので、それを起点に探す
     const deleteButtons = [...document.querySelectorAll('button')]
       .filter(btn => normalizeSpace(btn.textContent).includes('✖'));
 
@@ -233,7 +264,6 @@
         .some(b => normalizeSpace(b.textContent).includes('✖'));
       const hasMainImage = !!findMainCardImage(current);
 
-      // 小さすぎる要素ではなく、カード全体っぽい祖先を選ぶ
       if (hasPower && hasDelete && hasMainImage) {
         return current;
       }
@@ -250,8 +280,8 @@
       const src = (img.getAttribute('src') || '').trim();
       if (!alt) return false;
       if (src.includes('icon_')) return false;
-      if (['R', 'SR', 'SSR', 'N'].includes(alt)) return false;
       if (alt === 'からぱり☆カードコレクション!') return false;
+      if (['N', 'R', 'SR', 'SSR'].includes(alt)) return false;
       return true;
     }) || null;
   }
@@ -270,10 +300,7 @@
     const club = parseClub(text);
     const effects = parseEffects(text);
 
-    if (!club) {
-      console.warn('[CPCC] club not found:', { name, text, root });
-      return null;
-    }
+    if (!club) return null;
 
     return {
       id: `${name}__${power}__${club}__${rarity}__${index}`,
@@ -295,7 +322,6 @@
         return alt;
       }
     }
-
     const text = normalizeSpace(root.innerText || root.textContent || '');
     const m = text.match(/\b(SSR|SR|R|N)\b/);
     return m ? m[1] : null;
@@ -321,142 +347,72 @@
     return effects;
   }
 
-  function dedupeCards(cards) {
-    const map = new Map();
-    for (const c of cards) {
-      const key = `${c.name}__${c.power}__${c.club}__${c.rarity}__${c.effects.map(e => `${e.club}:${e.value}`).join(',')}`;
-      // 同一カードが複数ある可能性はあるので、完全重複だけを除外
-      if (!map.has(key)) {
-        map.set(key, c);
-      }
-    }
-    return [...map.values()];
+  // =========================
+  // ワーク読み込み
+  // =========================
+
+  function detectWorks() {
+    return WORK_ORDER.map(name => {
+      const root = findWorkRoot(name);
+      const unlocked = !!root && !normalizeSpace(root.innerText || root.textContent || '').includes('解放する');
+      const count = root ? parseCurrentCount(root) : 0;
+      return { name, root, unlocked, currentCount: count };
+    });
   }
 
-  // ----------------------------
-  // 最適化ロジック
-  // ----------------------------
-
-  function findBestDeck(cards, workName) {
-    const rule = WORK_RULES[workName];
-    const candidates = buildCandidates(cards, rule, workName);
-
-    let bestDeck = null;
+  function findWorkRoot(workName) {
+    const all = [...document.querySelectorAll('div, section, article')];
+    let best = null;
     let bestScore = -Infinity;
-    let bestDetail = null;
-    let checked = 0;
 
-    const sorted = [...candidates].sort((a, b) => estimateCardValue(b, rule) - estimateCardValue(a, rule));
+    for (const el of all) {
+      const text = normalizeSpace(el.innerText || el.textContent || '');
+      if (!text.includes(workName)) continue;
+      if (!text.includes('累計パワー')) continue;
 
-    dfs([], 0);
+      let score = 0;
+      if (text.includes('オプション効果')) score += 20;
+      if (text.includes(workName)) score += 20;
+      if (text.includes('5/5') || text.includes('0/5') || /[0-5]\/5/.test(text)) score += 10;
+      score -= text.length / 200;
 
-    return {
-      deck: bestDeck || [],
-      score: bestScore,
-      detail: bestDetail || { byCard: {} },
-      checked,
-      candidateCount: sorted.length,
-    };
-
-    function dfs(deck, start) {
-      if (deck.length === 5) {
-        checked++;
-        const detail = evaluateDeck(deck, rule);
-        if (detail.total > bestScore) {
-          bestScore = detail.total;
-          bestDeck = [...deck];
-          bestDetail = detail;
-        }
-        return;
-      }
-
-      const remain = 5 - deck.length;
-      if (start >= sorted.length) return;
-      if (sorted.length - start < remain) return;
-
-      const upperBound = estimateUpperBound(deck, sorted, start, remain, rule);
-      if (upperBound <= bestScore) return;
-
-      for (let i = start; i < sorted.length; i++) {
-        deck.push(sorted[i]);
-        dfs(deck, i + 1);
-        deck.pop();
+      if (score > bestScore) {
+        bestScore = score;
+        best = el;
       }
     }
+
+    return best;
   }
 
-  function buildCandidates(cards, rule, workName) {
-    const set = new Set();
-
-    const topPower = [...cards]
-      .sort((a, b) => b.power - a.power)
-      .slice(0, 25);
-
-    topPower.forEach(c => set.add(c));
-
-    if (rule.type === 'clubMultiplier' || rule.type === 'onlyClub') {
-      const targetClubs = new Set(rule.clubs);
-
-      const sameClub = cards
-        .filter(c => targetClubs.has(c.club))
-        .sort((a, b) => b.power - a.power)
-        .slice(0, 30);
-
-      const supporters = cards
-        .filter(c => c.effects.some(e => targetClubs.has(e.club) && e.value > 0))
-        .sort((a, b) => sumPositiveEffectsForTargets(b, targetClubs) - sumPositiveEffectsForTargets(a, targetClubs))
-        .slice(0, 20);
-
-      sameClub.forEach(c => set.add(c));
-      supporters.forEach(c => set.add(c));
-    } else {
-      // たまり場 / 生徒会室 は場効果無視なので、全体高Power + 強い正バフ持ち
-      const supporters = cards
-        .filter(c => c.effects.some(e => e.value > 0))
-        .sort((a, b) => sumPositiveEffects(b) - sumPositiveEffects(a))
-        .slice(0, 25);
-
-      supporters.forEach(c => set.add(c));
-    }
-
-    // 各部活の上位も少し残して、意外な組み合わせも拾う
-    for (const club of CLUBS) {
-      cards
-        .filter(c => c.club === club)
-        .sort((a, b) => b.power - a.power)
-        .slice(0, 5)
-        .forEach(c => set.add(c));
-    }
-
-    return [...set];
+  function parseCurrentCount(workRoot) {
+    const text = normalizeSpace(workRoot.innerText || workRoot.textContent || '');
+    const m = text.match(/([0-5])\/5/);
+    return m ? Number(m[1]) : 0;
   }
 
-  function evaluateDeck(deck, rule) {
-    const buffByClub = new Map();
-    for (const card of deck) {
-      for (const eff of card.effects) {
-        buffByClub.set(eff.club, (buffByClub.get(eff.club) || 0) + eff.value);
-      }
-    }
+  // =========================
+  // 評価ロジック
+  // =========================
 
-    const byCard = {};
-    let total = 0;
-
-    for (const card of deck) {
-      const base = applyWorkBase(card, rule);
-      const clubBonus = buffByClub.get(card.club) || 0;
-      const finalPower = Math.max(0, base * (1 + clubBonus / 100));
-
-      byCard[card.id] = clubBonus;
-      total += finalPower;
-    }
-
-    return { total, byCard };
+  function roundPower(value) {
+    const v = Math.max(0, value);
+    if (POWER_ROUND_MODE === 'ceil') return Math.ceil(v);
+    if (POWER_ROUND_MODE === 'round') return Math.round(v);
+    return Math.floor(v);
   }
 
   function applyWorkBase(card, rule) {
-    if (!rule || rule.type === 'none') {
-      return card.power;
+    if (!rule) return card.power;
+
+    if (rule.type === 'minPower') {
+      return Math.max(card.power, rule.minPower);
+    }
+
+    if (rule.type === 'rarityMultiplier') {
+      return rule.rarities.includes(card.rarity)
+        ? card.power * rule.multiplier
+        : card.power;
     }
 
     if (rule.type === 'clubMultiplier') {
@@ -474,52 +430,580 @@
     return card.power;
   }
 
+  function evaluateDeck(deck, rule) {
+    const buffByClub = new Map();
+    for (const card of deck) {
+      for (const eff of card.effects) {
+        buffByClub.set(eff.club, (buffByClub.get(eff.club) || 0) + eff.value);
+      }
+    }
+
+    const byCard = {};
+    let total = 0;
+
+    for (const card of deck) {
+      const baseAfterWork = applyWorkBase(card, rule);
+      const clubBonus = buffByClub.get(card.club) || 0;
+      const finalPower = roundPower(baseAfterWork * (1 + clubBonus / 100));
+
+      byCard[card.id] = {
+        bonusPercent: clubBonus,
+        baseAfterWork,
+        finalPower,
+      };
+      total += finalPower;
+    }
+
+    return { total, byCard };
+  }
+
   function estimateCardValue(card, rule) {
     let score = applyWorkBase(card, rule);
 
     for (const eff of card.effects) {
+      const plus = Math.max(0, eff.value);
+
       if (rule.type === 'clubMultiplier' || rule.type === 'onlyClub') {
-        if (rule.clubs.includes(eff.club) && eff.value > 0) {
-          score += eff.value * 3;
-        }
+        if (rule.clubs.includes(eff.club)) score += plus * 4;
+      } else if (rule.type === 'rarityMultiplier') {
+        score += plus * 2.2;
+      } else if (rule.type === 'minPower') {
+        score += plus * 2.5;
       } else {
-        if (eff.value > 0) score += eff.value * 2;
+        score += plus * 2;
       }
     }
 
     return score;
   }
 
-  function estimateUpperBound(deck, sorted, start, remain, rule) {
-    let sum = 0;
+  function buildCandidates(cards, rule) {
+    const set = new Set();
 
-    // いまのdeckをざっくり加点
-    for (const c of deck) {
-      sum += estimateCardValue(c, rule);
+    [...cards]
+      .sort((a, b) => b.power - a.power)
+      .slice(0, CONFIG.topPowerKeep)
+      .forEach(c => set.add(c));
+
+    if (rule.type === 'clubMultiplier' || rule.type === 'onlyClub') {
+      const targetClubs = new Set(rule.clubs);
+
+      cards
+        .filter(c => targetClubs.has(c.club))
+        .sort((a, b) => b.power - a.power)
+        .slice(0, CONFIG.sameClubKeep)
+        .forEach(c => set.add(c));
+
+      cards
+        .filter(c => c.effects.some(e => targetClubs.has(e.club) && e.value !== 0))
+        .sort((a, b) => sumEffectForTargets(b, targetClubs) - sumEffectForTargets(a, targetClubs))
+        .slice(0, CONFIG.supporterKeep)
+        .forEach(c => set.add(c));
+    } else if (rule.type === 'rarityMultiplier') {
+      cards
+        .filter(c => c.rarity === 'N')
+        .sort((a, b) => b.power - a.power)
+        .slice(0, CONFIG.sameClubKeep)
+        .forEach(c => set.add(c));
+
+      cards
+        .filter(c => c.effects.some(e => e.value > 0))
+        .sort((a, b) => sumPositiveEffects(b) - sumPositiveEffects(a))
+        .slice(0, CONFIG.supporterKeep)
+        .forEach(c => set.add(c));
+    } else if (rule.type === 'minPower') {
+      cards
+        .filter(c => c.power <= rule.minPower)
+        .sort((a, b) => sumPositiveEffects(b) - sumPositiveEffects(a))
+        .slice(0, CONFIG.supporterKeep)
+        .forEach(c => set.add(c));
+
+      cards
+        .filter(c => c.effects.some(e => e.value > 0))
+        .sort((a, b) => sumPositiveEffects(b) - sumPositiveEffects(a))
+        .slice(0, CONFIG.supporterKeep)
+        .forEach(c => set.add(c));
     }
 
-    // 残り候補の上位を加算
-    for (let i = start; i < Math.min(sorted.length, start + remain); i++) {
-      sum += estimateCardValue(sorted[i], rule);
+    for (const club of CLUBS) {
+      cards
+        .filter(c => c.club === club)
+        .sort((a, b) => b.power - a.power)
+        .slice(0, CONFIG.eachClubKeep)
+        .forEach(c => set.add(c));
     }
 
-    return sum;
+    return [...set];
   }
+
+  function searchTopDeckOptions(cards, workName, maxKeep = CONFIG.topDeckOptionsPerWork) {
+    const rule = WORK_RULES[workName];
+    const candidates = buildCandidates(cards, rule)
+      .sort((a, b) => estimateCardValue(b, rule) - estimateCardValue(a, rule));
+
+    const bestOptions = [];
+    let explored = 0;
+
+    // 空デッキも候補に入れる
+    bestOptions.push({
+      workName,
+      deck: [],
+      score: 0,
+      detail: { total: 0, byCard: {} },
+      key: '',
+      exploredAt: 0,
+    });
+
+    dfs([], 0);
+
+    bestOptions.sort((a, b) => b.score - a.score);
+    return {
+      workName,
+      rule,
+      candidates,
+      options: bestOptions.slice(0, maxKeep),
+      explored,
+    };
+
+    function dfs(deck, start) {
+      // 0〜5枚を候補にする
+      if (deck.length > 0) {
+        explored++;
+        const detail = evaluateDeck(deck, rule);
+        const option = {
+          workName,
+          deck: [...deck],
+          score: detail.total,
+          detail,
+          key: deck.map(c => c.id).sort().join('|'),
+          exploredAt: explored,
+        };
+        pushBestOption(bestOptions, option, maxKeep);
+      }
+
+      if (deck.length >= 5) return;
+      if (start >= candidates.length) return;
+
+      const remain = 5 - deck.length;
+      const upperBound = estimateDeckUpperBound(deck, candidates, start, remain, rule);
+      const worst = bestOptions.length >= maxKeep ? bestOptions[bestOptions.length - 1].score : -Infinity;
+      if (bestOptions.length >= maxKeep && upperBound < worst) return;
+
+      for (let i = start; i < candidates.length; i++) {
+        deck.push(candidates[i]);
+        dfs(deck, i + 1);
+        deck.pop();
+      }
+    }
+  }
+
+  function estimateDeckUpperBound(deck, candidates, start, remain, rule) {
+    let score = 0;
+    for (const c of deck) score += estimateCardValue(c, rule);
+    for (let i = start; i < Math.min(candidates.length, start + remain); i++) {
+      score += estimateCardValue(candidates[i], rule);
+    }
+    return score;
+  }
+
+  function pushBestOption(arr, option, maxKeep) {
+    if (arr.some(x => x.key === option.key)) return;
+    arr.push(option);
+    arr.sort((a, b) => b.score - a.score);
+    if (arr.length > maxKeep) arr.length = maxKeep;
+  }
+
+  function findBestSingleWork(cards, workName) {
+    const searched = searchTopDeckOptions(cards, workName, 1);
+    const top = searched.options[0] || { deck: [], score: 0, detail: { total: 0, byCard: {} } };
+    return {
+      workName,
+      deck: top.deck,
+      score: top.score,
+      detail: top.detail,
+      candidateCount: searched.candidates.length,
+      explored: searched.explored,
+    };
+  }
+
+  function findGlobalBestAllocation(cards, works) {
+    const unlockedWorks = works.filter(w => w.unlocked).map(w => w.name);
+    const searchedByWork = unlockedWorks.map(workName => searchTopDeckOptions(cards, workName));
+
+    // 候補数が少ない順に並べた方が探索しやすい
+    searchedByWork.sort((a, b) => a.options.length - b.options.length);
+
+    let bestScore = -Infinity;
+    let bestByWork = {};
+    let nodes = 0;
+
+    dfs(0, new Set(), {}, 0);
+
+    return {
+      totalScore: bestScore,
+      byWork: bestByWork,
+      nodes,
+      searchedByWork,
+    };
+
+    function dfs(index, usedCardIds, currentByWork, currentScore) {
+      nodes++;
+
+      if (index >= searchedByWork.length) {
+        if (currentScore > bestScore) {
+          bestScore = currentScore;
+          bestByWork = clonePlan(currentByWork);
+        }
+        return;
+      }
+
+      const optimistic = currentScore + sumRemainingBest(index);
+      if (optimistic <= bestScore) return;
+
+      const item = searchedByWork[index];
+      const options = item.options;
+
+      for (const option of options) {
+        if (!canUseOption(option, usedCardIds)) continue;
+
+        const added = [];
+        for (const card of option.deck) {
+          usedCardIds.add(card.id);
+          added.push(card.id);
+        }
+
+        currentByWork[item.workName] = option;
+        dfs(index + 1, usedCardIds, currentByWork, currentScore + option.score);
+
+        delete currentByWork[item.workName];
+        for (const id of added) usedCardIds.delete(id);
+      }
+    }
+
+    function sumRemainingBest(startIndex) {
+      let s = 0;
+      for (let i = startIndex; i < searchedByWork.length; i++) {
+        s += searchedByWork[i].options[0]?.score || 0;
+      }
+      return s;
+    }
+  }
+
+  function canUseOption(option, usedCardIds) {
+    for (const card of option.deck) {
+      if (usedCardIds.has(card.id)) return false;
+    }
+    return true;
+  }
+
+  function clonePlan(byWork) {
+    const out = {};
+    for (const [k, v] of Object.entries(byWork)) {
+      out[k] = v;
+    }
+    return out;
+  }
+
+  // =========================
+  // 実行
+  // =========================
+
+  function runSingleWork(workName) {
+    if (!state.cards.length) reloadAll();
+
+    const res = findBestSingleWork(state.cards, workName);
+    state.singleResults[workName] = res;
+
+    setResultHtml(renderSingleWorkResult(workName, res));
+  }
+
+  function runGlobalOptimization() {
+    if (!state.cards.length) reloadAll();
+
+    const plan = findGlobalBestAllocation(state.cards, state.works);
+    state.globalPlan = plan;
+
+    setResultHtml(renderGlobalPlan(plan));
+  }
+
+  function renderSingleWorkResult(workName, res) {
+    return `
+      <div class="cpcc-card">
+        <div class="cpcc-title">${escapeHtml(workName)} 単体最適</div>
+        <div class="cpcc-score">推定合計Power: ${formatNum(res.score)}</div>
+        <div class="cpcc-sub">候補数: ${res.candidateCount} / 探索数: ${formatNum(res.explored)}</div>
+        <div class="cpcc-btns">
+          <button class="green" data-cpcc-action="set-work" data-work="${escapeHtml(workName)}">このデッキをセット</button>
+        </div>
+      </div>
+      ${renderDeckCards(res.deck, res.detail)}
+    `;
+  }
+
+  function renderGlobalPlan(plan) {
+    const rows = [];
+    const shownWorks = WORK_ORDER.filter(name => state.works.find(w => w.name === name && w.unlocked));
+
+    for (const workName of shownWorks) {
+      const item = plan.byWork[workName] || {
+        deck: [],
+        score: 0,
+        detail: { total: 0, byCard: {} },
+      };
+
+      rows.push(`
+        <div class="cpcc-card">
+          <div class="cpcc-title">${escapeHtml(workName)}</div>
+          <div class="cpcc-score">推定Power: ${formatNum(item.score || 0)}</div>
+          <div class="cpcc-btns">
+            <button class="green" data-cpcc-action="set-work" data-work="${escapeHtml(workName)}">このワークにセット</button>
+          </div>
+        </div>
+        ${renderDeckCards(item.deck || [], item.detail || { byCard: {} })}
+      `);
+    }
+
+    const searchedSummary = plan.searchedByWork.map(x => {
+      return `<div>${escapeHtml(x.workName)}: 候補デッキ ${x.options.length} / 探索 ${formatNum(x.explored)}</div>`;
+    }).join('');
+
+    return `
+      <div class="cpcc-card">
+        <div class="cpcc-title">全ワーク最適化結果</div>
+        <div class="cpcc-score">合計推定Power: ${formatNum(plan.totalScore)}</div>
+        <div class="cpcc-sub">探索ノード: ${formatNum(plan.nodes)}</div>
+        <div class="cpcc-sub">${searchedSummary}</div>
+        <div class="cpcc-btns">
+          <button class="green" data-cpcc-action="set-global">この全プランを自動セット</button>
+        </div>
+        <div class="cpcc-sub cpcc-warn">既に入っているカードがある場合は、先にそのワークを空にする処理を試みます</div>
+      </div>
+      ${rows.join('')}
+    `;
+  }
+
+  function renderDeckCards(deck, detail) {
+    if (!deck?.length) {
+      return `<div class="cpcc-card"><span class="cpcc-muted">カードなし</span></div>`;
+    }
+
+    return deck.map(c => {
+      const d = detail?.byCard?.[c.id] || { bonusPercent: 0, baseAfterWork: c.power, finalPower: c.power };
+      return `
+        <div class="cpcc-card">
+          <div class="cpcc-title">${escapeHtml(c.name)} <span class="cpcc-sub">[${escapeHtml(c.rarity)}]</span></div>
+          <div>部活: ${escapeHtml(c.club)} / 基礎Power: ${c.power}</div>
+          <div>場効果後: ${formatNum(d.baseAfterWork)} / 部活補正: ${d.bonusPercent > 0 ? '+' : ''}${d.bonusPercent}% / 最終: ${formatNum(d.finalPower)}</div>
+        </div>
+      `;
+    }).join('');
+  }
+
+  // =========================
+  // 自動セット
+  // =========================
+
+  async function autoSetGlobalPlan(byWork) {
+    setStatus('全プラン自動セットを開始します...');
+
+    // 先に対象ワークを空にする
+    for (const workName of WORK_ORDER) {
+      const item = byWork[workName];
+      if (!item) continue;
+      await clearWorkDeck(workName);
+    }
+
+    // 順番にセット
+    for (const workName of WORK_ORDER) {
+      const item = byWork[workName];
+      if (!item) continue;
+      await autoSetWorkDeck(workName, item.deck, { skipClear: true });
+    }
+
+    setStatus('全プランの自動セットが完了しました');
+  }
+
+  async function autoSetWorkDeck(workName, deck, opts = {}) {
+    const work = state.works.find(w => w.name === workName) || { root: findWorkRoot(workName), unlocked: true };
+    if (!work.root) {
+      alert(`ワークが見つかりません: ${workName}`);
+      return;
+    }
+
+    if (!opts.skipClear) {
+      await clearWorkDeck(workName);
+    }
+
+    if (!deck?.length) {
+      setStatus(`${workName}: セット対象カードなし`);
+      return;
+    }
+
+    setStatus(`${workName}: ${deck.length} 枚をセット中...`);
+
+    for (const card of deck) {
+      const slot = findNextEmptySlot(work.root);
+      if (!slot) {
+        console.warn('[CPCC] empty slot not found', workName);
+        break;
+      }
+
+      simulateClick(slot);
+      await sleep(CONFIG.autoClickDelayLong);
+
+      const cardRoot = findOwnedCardRootForSelection(card);
+      if (!cardRoot) {
+        console.warn('[CPCC] owned card root not found', card);
+        continue;
+      }
+
+      const target = findClickableCardTarget(cardRoot);
+      if (!target) {
+        console.warn('[CPCC] clickable target not found', card);
+        continue;
+      }
+
+      simulateClick(target);
+      await sleep(CONFIG.autoClickDelayLong);
+    }
+
+    setStatus(`${workName}: 自動セット完了`);
+  }
+
+  async function clearWorkDeck(workName) {
+    const workRoot = findWorkRoot(workName);
+    if (!workRoot) return;
+
+    const currentCount = parseCurrentCount(workRoot);
+    if (currentCount <= 0) return;
+
+    setStatus(`${workName}: 既存カードを外しています...`);
+
+    // ワーク内の大きいカード画像をクリックして外す想定
+    // ページ仕様変更時はここを調整
+    for (let loop = 0; loop < 8; loop++) {
+      const cardTargets = findFilledWorkCardTargets(workRoot);
+      if (!cardTargets.length) break;
+
+      for (const target of cardTargets) {
+        simulateClick(target);
+        await sleep(CONFIG.autoClickDelayLong);
+      }
+
+      await sleep(CONFIG.autoClickDelayLong);
+
+      if (parseCurrentCount(workRoot) === 0) break;
+    }
+  }
+
+  function findNextEmptySlot(workRoot) {
+    const candidates = [...workRoot.querySelectorAll('*')];
+    let best = null;
+
+    for (const el of candidates) {
+      const text = normalizeSpace(el.textContent || '');
+      const title = normalizeSpace(el.getAttribute?.('title') || '');
+
+      if (!(text.includes('空き') || text.includes('＋') || text === '+' || title.includes('空き'))) continue;
+
+      const rect = safeRect(el);
+      if (rect.width < 30 || rect.height < 30) continue;
+
+      best = el;
+      break;
+    }
+
+    return best;
+  }
+
+  function findFilledWorkCardTargets(workRoot) {
+    const imgs = [...workRoot.querySelectorAll('img[alt]')].filter(img => {
+      const alt = (img.getAttribute('alt') || '').trim();
+      const src = (img.getAttribute('src') || '').trim();
+      if (!alt) return false;
+      if (src.includes('icon_')) return false;
+      if (alt === 'からぱり☆カードコレクション!') return false;
+      if (['N', 'R', 'SR', 'SSR'].includes(alt)) return false;
+      return true;
+    });
+
+    return imgs;
+  }
+
+  function findOwnedCardRootForSelection(card) {
+    const roots = findOwnedCardRoots();
+
+    // まずは厳密一致
+    let exact = roots.find(root => {
+      const parsed = parseCardSignature(root);
+      return parsed &&
+        parsed.name === card.name &&
+        parsed.power === card.power &&
+        parsed.club === card.club &&
+        parsed.rarity === card.rarity;
+    });
+    if (exact) return exact;
+
+    // 名前 + Power
+    exact = roots.find(root => {
+      const parsed = parseCardSignature(root);
+      return parsed && parsed.name === card.name && parsed.power === card.power;
+    });
+    if (exact) return exact;
+
+    // 名前だけ
+    return roots.find(root => {
+      const parsed = parseCardSignature(root);
+      return parsed && parsed.name === card.name;
+    }) || null;
+  }
+
+  function parseCardSignature(root) {
+    const text = normalizeSpace(root.innerText || root.textContent || '');
+    const img = findMainCardImage(root);
+    if (!img) return null;
+
+    const name = (img.getAttribute('alt') || '').trim();
+    const powerMatch = text.match(/Power\s*(\d+)/i);
+    const rarity = parseRarity(root) || 'N';
+    const club = parseClub(text);
+
+    return {
+      name,
+      power: powerMatch ? Number(powerMatch[1]) : null,
+      club,
+      rarity,
+    };
+  }
+
+  function findClickableCardTarget(cardRoot) {
+    const mainImg = findMainCardImage(cardRoot);
+    if (mainImg) return mainImg;
+    return cardRoot;
+  }
+
+  function simulateClick(el) {
+    if (!el) return;
+    el.dispatchEvent(new MouseEvent('mouseover', { bubbles: true, cancelable: true, view: window }));
+    el.dispatchEvent(new MouseEvent('mousedown', { bubbles: true, cancelable: true, view: window }));
+    el.dispatchEvent(new MouseEvent('mouseup', { bubbles: true, cancelable: true, view: window }));
+    el.dispatchEvent(new MouseEvent('click', { bubbles: true, cancelable: true, view: window }));
+  }
+
+  // =========================
+  // utility
+  // =========================
 
   function sumPositiveEffects(card) {
     return card.effects.reduce((s, e) => s + Math.max(0, e.value), 0);
   }
 
-  function sumPositiveEffectsForTargets(card, targetClubs) {
+  function sumEffectForTargets(card, targetClubs) {
     return card.effects.reduce((s, e) => {
       if (!targetClubs.has(e.club)) return s;
-      return s + Math.max(0, e.value);
+      return s + e.value;
     }, 0);
   }
-
-  // ----------------------------
-  // utility
-  // ----------------------------
 
   function normalizeSpace(str) {
     return String(str || '').replace(/\s+/g, ' ').trim();
@@ -538,14 +1022,25 @@
       .replaceAll("'", '&#39;');
   }
 
-  // 遅延初期化
-  const boot = () => {
+  function formatNum(v) {
+    return Number(v || 0).toLocaleString();
+  }
+
+  function sleep(ms) {
+    return new Promise(resolve => setTimeout(resolve, ms));
+  }
+
+  function safeRect(el) {
     try {
-      init();
-    } catch (e) {
-      console.error('[CPCC] init error', e);
+      return el.getBoundingClientRect();
+    } catch {
+      return { width: 0, height: 0 };
     }
-  };
+  }
+
+  // =========================
+  // 起動
+  // =========================
 
   if (document.readyState === 'loading') {
     document.addEventListener('DOMContentLoaded', boot, { once: true });
