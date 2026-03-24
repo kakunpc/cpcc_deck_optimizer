@@ -12,7 +12,7 @@
   const CONFIG = {
     topDeckOptionsPerWork: 120, // 各ワークで保持する候補デッキ数
     optimizeYieldEvery: 250,
-    storageCacheVersion: 1,
+    storageCacheVersion: 2,
     storageCacheMaxEntries: 300,
     prefilterOverallKeep: 260,
     prefilterPerClubKeep: 32,
@@ -26,6 +26,8 @@
     synergyPairAnchorKeep: 24,
     synergyPoolKeep: 18,
     synergyGeneralKeep: 12,
+    currentDeckSwapPoolKeep: 18,
+    currentDeckPairSwapKeep: 8,
     synergyProgressEveryDecks: 1000,
     autoStepDelay: 300,
     autoClickDelay: 220,
@@ -92,6 +94,7 @@
 
   const CACHE_INDEX_KEY = 'cpcc_optimizer_cache_index_v1';
   const CACHE_KEY_PREFIX = 'cpcc_optimizer_cache_v1:';
+  const OPTION_SCAN_CACHE_KEY_PREFIX = 'cpcc_optimizer_option_scan_v1:';
 
   // =========================
   // 初期化
@@ -463,6 +466,26 @@
       ${previewCards}
       <div class="cpcc-hr"></div>
       ${workInfo}
+    `;
+  }
+
+  function renderLiveSearchPreview(workName, bestOption, progress = {}) {
+    const title = progress.mode === 'global'
+      ? `全ワーク最適化中: ${workName} の暫定トップ`
+      : `${workName} 探索中の暫定トップ`;
+    const detail = bestOption?.detail || getFreshDeckDetail(workName, bestOption?.deck || [], null) || { total: 0, byCard: {} };
+    const deck = bestOption?.deck || [];
+    const progressText = progress.totalGroups
+      ? `軸 ${formatNum(progress.processedGroups || 0)} / ${formatNum(progress.totalGroups || 0)} / 試行 ${formatNum(progress.explored || 0)}`
+      : `試行 ${formatNum(progress.explored || 0)}`;
+
+    return `
+      <div class="cpcc-card">
+        <div class="cpcc-title">${escapeHtml(title)}</div>
+        <div class="cpcc-score">暫定Power: ${formatNum(bestOption?.score || 0)}</div>
+        <div class="cpcc-sub">${escapeHtml(progressText)}</div>
+      </div>
+      ${renderDeckCards(deck, detail)}
     `;
   }
 
@@ -857,153 +880,178 @@
     return 'なし';
   }
 
-  function estimateCardValue(card, rule, analysis = null) {
+  function computeCardOptionMetrics(card) {
+    const buffByClub = new Map();
+    const slotByClub = new Map();
+    let positiveTotal = 0;
+    let negativeTotal = 0;
+
+    for (const eff of card.effects) {
+      if (eff.value > 0) {
+        positiveTotal += eff.value;
+        buffByClub.set(eff.club, (buffByClub.get(eff.club) || 0) + eff.value);
+        slotByClub.set(eff.club, (slotByClub.get(eff.club) || 0) + 1);
+      } else if (eff.value < 0) {
+        negativeTotal += Math.abs(eff.value);
+      }
+    }
+
+    let maxBuffClub = card.club;
+    let maxBuffTotal = 0;
+    let maxBuffSlots = 0;
+    for (const [club, total] of buffByClub.entries()) {
+      const slots = slotByClub.get(club) || 0;
+      if (
+        total > maxBuffTotal
+        || (total === maxBuffTotal && slots > maxBuffSlots)
+      ) {
+        maxBuffClub = club;
+        maxBuffTotal = total;
+        maxBuffSlots = slots;
+      }
+    }
+
+    const ownPositive = buffByClub.get(card.club) || 0;
+    const ownSlots = slotByClub.get(card.club) || 0;
+    const optionScore = (positiveTotal * 8) + (maxBuffTotal * 14) + (maxBuffSlots * 900) + (ownPositive * 5) - (negativeTotal * 4);
+
+    return {
+      positiveTotal,
+      negativeTotal,
+      ownPositive,
+      ownSlots,
+      maxBuffClub,
+      maxBuffTotal,
+      maxBuffSlots,
+      buffByClub,
+      slotByClub,
+      optionScore,
+    };
+  }
+
+  function getOptionScanInfo(card, optionScan = null) {
+    return optionScan?.byId?.get(card.id) || computeCardOptionMetrics(card);
+  }
+
+  function getTargetOptionMetrics(metrics, rule) {
+    const targetClubs = new Set(rule.clubs || []);
+    let targetPositive = 0;
+    let targetSlots = 0;
+
+    for (const club of targetClubs) {
+      targetPositive += metrics.buffByClub?.get(club) || 0;
+      targetSlots += metrics.slotByClub?.get(club) || 0;
+    }
+
+    return { targetPositive, targetSlots };
+  }
+
+  function estimateOptionFitForRule(card, rule, metrics) {
+    const { targetPositive, targetSlots } = getTargetOptionMetrics(metrics, rule);
+    let score = metrics.optionScore;
+
+    if (rule.type === 'clubMultiplier') {
+      score += targetPositive * 22;
+      score += targetSlots * 1800;
+      if (rule.clubs.includes(card.club)) {
+        score += card.power * rule.multiplier * 1.35;
+        score += metrics.ownPositive * 12;
+        score += metrics.ownSlots * 500;
+      } else if (targetPositive === 0) {
+        score -= 2200;
+      }
+    } else if (rule.type === 'onlyClub') {
+      score += targetPositive * 24;
+      score += targetSlots * 2200;
+      if (rule.clubs.includes(card.club)) {
+        score += card.power * 1.8;
+        score += metrics.ownPositive * 10;
+      } else {
+        score -= 12000;
+      }
+    } else if (rule.type === 'rarityMultiplier') {
+      score += metrics.positiveTotal * 10;
+      score += metrics.maxBuffTotal * 8;
+      if (rule.rarities?.includes(card.rarity)) {
+        score += card.power * rule.multiplier * 1.2;
+        score += metrics.ownPositive * 8;
+      } else if (metrics.positiveTotal === 0) {
+        score -= 1800;
+      }
+    } else if (rule.type === 'minPower') {
+      score += metrics.positiveTotal * 12;
+      score += metrics.maxBuffTotal * 10;
+      score += metrics.maxBuffSlots * 500;
+      if (card.power < rule.minPower) {
+        score += (rule.minPower - card.power) * 3.5;
+        score += metrics.ownPositive * 5;
+      } else {
+        score += card.power * 0.45;
+      }
+    }
+
+    return {
+      score,
+      targetPositive,
+      targetSlots,
+    };
+  }
+
+  function getBestFocusClubForRule(rule, metrics, fallbackClub) {
+    const targetClubs = rule.clubs || [];
+    let bestClub = '';
+    let bestTotal = -1;
+
+    for (const club of targetClubs) {
+      const total = metrics.buffByClub?.get(club) || 0;
+      if (total > bestTotal) {
+        bestClub = club;
+        bestTotal = total;
+      }
+    }
+
+    return bestTotal > 0 ? bestClub : (metrics.maxBuffClub || fallbackClub);
+  }
+
+  function estimateCardValue(card, rule, analysis = null, optionScan = null) {
     const cached = analysis?.byId?.get(card.id);
     if (cached) return cached.estimateCardValue;
 
     const baseScore = applyWorkBase(card, rule);
     const tier = getCardTierProfile(card, rule);
-    let score = baseScore;
-    let ownPositive = 0;
-    let ownNegative = 0;
-    let relevantPositive = 0;
-    let relevantNegative = 0;
-    let otherPositive = 0;
-    let otherNegative = 0;
+    const metrics = getOptionScanInfo(card, optionScan);
+    const optionFit = estimateOptionFitForRule(card, rule, metrics);
 
-    const targetClubs = new Set(rule.clubs || []);
-
-    for (const eff of card.effects) {
-      if (eff.value >= 0) {
-        if (eff.club === card.club) ownPositive += eff.value;
-        else if (targetClubs.has(eff.club)) relevantPositive += eff.value;
-        else otherPositive += eff.value;
-      } else {
-        if (eff.club === card.club) ownNegative += Math.abs(eff.value);
-        else if (targetClubs.has(eff.club)) relevantNegative += Math.abs(eff.value);
-        else otherNegative += Math.abs(eff.value);
-      }
-    }
-
-    // 上級者向けの判断:
-    // 自部活への加算が強いカードは、単純な素パワー以上に伸びやすい
-    score += ownPositive * 9;
-    score += relevantPositive * 5;
-    score += otherPositive * 1.5;
-    score -= ownNegative * 7;
-    score -= relevantNegative * 4;
-    score -= otherNegative * 1.2;
-
-    if ((rule.type === 'clubMultiplier' || rule.type === 'onlyClub') && targetClubs.has(card.club)) {
-      score += ownPositive * 4;
-      score += baseScore * 0.35;
-    }
-
-    if (rule.type === 'rarityMultiplier' && rule.rarities?.includes(card.rarity)) {
-      score += ownPositive * 2;
-      score += relevantPositive * 1.5;
-    }
-
-    if (rule.type === 'minPower') {
-      if (card.power < rule.minPower) {
-        score += (rule.minPower - card.power) * 1.6;
-        score += (ownPositive * 3.5) + (relevantPositive * 1.5);
-      }
-      score += ownPositive * 2.5;
-    }
-
-    if (card.effects.length === 0) {
-      score -= Math.max(80, baseScore * 0.35);
-    } else if ((ownPositive + relevantPositive + otherPositive) === 0) {
-      score -= Math.max(120, baseScore * 0.45);
-    }
-
-    if (ownPositive >= 100) {
-      score += baseScore * (ownPositive / 100) * 0.45;
-    }
-
-    score += tier.score;
-
-    return score;
+    return (baseScore * 0.8) + optionFit.score + tier.score;
   }
 
-  function createCardAnalysis(cards, rule) {
+  function createCardAnalysis(cards, rule, optionScan = null) {
     const byId = new Map();
-    const targetClubs = new Set(rule.clubs || []);
 
     for (const card of cards) {
       const baseScore = applyWorkBase(card, rule);
       const tier = getCardTierProfile(card, rule);
-      let ownPositive = 0;
-      let ownNegative = 0;
-      let relevantPositive = 0;
-      let relevantNegative = 0;
-      let otherPositive = 0;
-      let otherNegative = 0;
-      let positiveTotal = 0;
-      let positiveSlots = 0;
-
-      for (const eff of card.effects) {
-        if (eff.value >= 0) {
-          positiveTotal += eff.value;
-          positiveSlots += eff.value > 0 ? 1 : 0;
-          if (eff.club === card.club) ownPositive += eff.value;
-          else if (targetClubs.has(eff.club)) relevantPositive += eff.value;
-          else otherPositive += eff.value;
-        } else {
-          if (eff.club === card.club) ownNegative += Math.abs(eff.value);
-          else if (targetClubs.has(eff.club)) relevantNegative += Math.abs(eff.value);
-          else otherNegative += Math.abs(eff.value);
-        }
-      }
-
-      let estimate = baseScore;
-      estimate += ownPositive * 9;
-      estimate += relevantPositive * 5;
-      estimate += otherPositive * 1.5;
-      estimate -= ownNegative * 7;
-      estimate -= relevantNegative * 4;
-      estimate -= otherNegative * 1.2;
-
-      if ((rule.type === 'clubMultiplier' || rule.type === 'onlyClub') && targetClubs.has(card.club)) {
-        estimate += ownPositive * 4;
-        estimate += baseScore * 0.35;
-      }
-
-      if (rule.type === 'rarityMultiplier' && rule.rarities?.includes(card.rarity)) {
-        estimate += ownPositive * 2;
-        estimate += relevantPositive * 1.5;
-      }
-
-      if (rule.type === 'minPower') {
-        if (card.power < rule.minPower) {
-          estimate += (rule.minPower - card.power) * 1.6;
-          estimate += (ownPositive * 3.5) + (relevantPositive * 1.5);
-        }
-        estimate += ownPositive * 2.5;
-      }
-
-      if (card.effects.length === 0) {
-        estimate -= Math.max(80, baseScore * 0.35);
-      } else if ((ownPositive + relevantPositive + otherPositive) === 0) {
-        estimate -= Math.max(120, baseScore * 0.45);
-      }
-
-      if (ownPositive >= 100) {
-        estimate += baseScore * (ownPositive / 100) * 0.45;
-      }
-
-      estimate += tier.score;
+      const metrics = getOptionScanInfo(card, optionScan);
+      const optionFit = estimateOptionFitForRule(card, rule, metrics);
+      const estimate = (baseScore * 0.8) + optionFit.score + tier.score;
 
       byId.set(card.id, {
         baseScore,
         tier,
-        focusClub: tier.focusClub,
-        ownPositive,
-        relevantPositive,
-        otherPositive,
-        positiveTotal,
-        positiveSlots,
+        focusClub: optionFit.targetPositive > 0
+          ? getBestFocusClubForRule(rule, metrics, tier.focusClub)
+          : (metrics.maxBuffClub || tier.focusClub),
+        ownPositive: metrics.ownPositive,
+        relevantPositive: optionFit.targetPositive,
+        otherPositive: Math.max(0, metrics.positiveTotal - metrics.ownPositive - optionFit.targetPositive),
+        positiveTotal: metrics.positiveTotal,
+        positiveSlots: metrics.maxBuffSlots,
+        targetPositive: optionFit.targetPositive,
+        targetSlots: optionFit.targetSlots,
+        optionScore: metrics.optionScore,
+        maxBuffClub: metrics.maxBuffClub,
+        maxBuffTotal: metrics.maxBuffTotal,
+        maxBuffSlots: metrics.maxBuffSlots,
         estimateCardValue: estimate,
       });
     }
@@ -1011,9 +1059,9 @@
     return { byId };
   }
 
-  function prefilterCardsForSearch(cards, rule) {
+  function prefilterCardsForSearch(cards, rule, optionScan = null) {
     const sourceCards = getRuleRelevantCards(cards, rule);
-    const ranked = [...sourceCards].sort((a, b) => estimateCardValueFast(b, rule) - estimateCardValueFast(a, rule));
+    const ranked = [...sourceCards].sort((a, b) => estimateCardValueFast(b, rule, optionScan) - estimateCardValueFast(a, rule, optionScan));
     const picked = [];
     const seen = new Set();
 
@@ -1042,40 +1090,10 @@
     return picked;
   }
 
-  function estimateCardValueFast(card, rule) {
-    let score = applyWorkBase(card, rule);
-    let positiveTotal = 0;
-    let relevantPositive = 0;
-    let negativeTotal = 0;
-    const targetClubs = new Set(rule.clubs || []);
-
-    for (const eff of card.effects) {
-      if (eff.value > 0) {
-        positiveTotal += eff.value;
-        if (targetClubs.has(eff.club) || eff.club === card.club) relevantPositive += eff.value;
-      } else if (eff.value < 0) {
-        negativeTotal += Math.abs(eff.value);
-      }
-    }
-
-    score += positiveTotal * 2.4;
-    score += relevantPositive * 3.2;
-    score -= negativeTotal * 1.1;
-
-    if (rule.type === 'minPower' && card.power < rule.minPower) {
-      score += (rule.minPower - card.power) * 2.2;
-    }
-    if (rule.type === 'clubMultiplier' && targetClubs.has(card.club)) {
-      score += applyWorkBase(card, rule) * 0.3;
-    }
-    if (rule.type === 'onlyClub' && targetClubs.has(card.club)) {
-      score += applyWorkBase(card, rule) * 0.5;
-    }
-    if (rule.type === 'rarityMultiplier' && rule.rarities?.includes(card.rarity)) {
-      score += applyWorkBase(card, rule) * 0.25;
-    }
-
-    return score;
+  function estimateCardValueFast(card, rule, optionScan = null) {
+    const metrics = getOptionScanInfo(card, optionScan);
+    const optionFit = estimateOptionFitForRule(card, rule, metrics);
+    return (applyWorkBase(card, rule) * 0.7) + optionFit.score;
   }
 
   function getFastFocusClubs(rankedCards, rule) {
@@ -1097,9 +1115,9 @@
       .map(([club]) => club);
   }
 
-  function buildCandidates(cards, rule, analysis = null) {
+  function buildCandidates(cards, rule, analysis = null, optionScan = null) {
     const sourceCards = getRuleRelevantCards(cards, rule);
-    const ranked = [...sourceCards].sort((a, b) => estimateCardValue(b, rule, analysis) - estimateCardValue(a, rule, analysis));
+    const ranked = [...sourceCards].sort((a, b) => estimateCardValue(b, rule, analysis, optionScan) - estimateCardValue(a, rule, analysis, optionScan));
     const picked = [];
     const seen = new Set();
 
@@ -1163,18 +1181,20 @@
       .map(([club]) => club);
   }
 
-  async function searchTopDeckOptions(cards, workName, maxKeep = CONFIG.topDeckOptionsPerWork, onProgress = null) {
+  async function searchTopDeckOptions(cards, workName, maxKeep = CONFIG.topDeckOptionsPerWork, onProgress = null, opts = {}) {
     const rule = WORK_RULES[workName];
-    const cacheKey = buildSearchCacheKey(cards, workName);
+    const seedDeck = opts.seedDeck || [];
+    const cacheKey = buildSearchCacheKey(cards, workName, seedDeck);
     const cached = await loadSearchCache(cacheKey, cards, workName);
     if (cached) {
       onProgress?.(`${workName}: 保存済みキャッシュを使用しました`);
       return cached;
     }
 
-    const prefilteredCards = prefilterCardsForSearch(cards, rule);
-    const analysis = createCardAnalysis(prefilteredCards, rule);
-    const candidates = buildCandidates(prefilteredCards, rule, analysis);
+    const optionScan = await getOrCreateOptionScan(cards);
+    const prefilteredCards = prefilterCardsForSearch(cards, rule, optionScan);
+    const analysis = createCardAnalysis(prefilteredCards, rule, optionScan);
+    const candidates = buildCandidates(prefilteredCards, rule, analysis, optionScan);
     const emptyOption = {
       workName,
       deck: [],
@@ -1197,13 +1217,17 @@
     }
 
     const progress = createSynergySearchProgress(workName, onProgress);
-    const exactResult = await enumerateTopDeckOptionsBySynergy(candidates, rule, analysis, {
+    const exactResult = await enumerateTopDeckOptionsBySynergy(candidates, rule, analysis, optionScan, {
       maxKeep,
       workName,
       onProgress: progress.report,
     });
+    const swapSeedResult = enumerateTopDeckOptionsAroundCurrentDeck(cards, seedDeck, candidates, rule, analysis, optionScan, {
+      maxKeep,
+      workName,
+    });
 
-    const options = [emptyOption, ...exactResult.options]
+    const options = [emptyOption, ...exactResult.options, ...swapSeedResult.options]
       .filter((option, index, arr) => arr.findIndex(x => x.key === option.key) === index)
       .sort((a, b) => b.score - a.score)
       .slice(0, maxKeep);
@@ -1218,25 +1242,25 @@
       rule,
       candidates,
       options,
-      explored: exactResult.explored,
+      explored: exactResult.explored + swapSeedResult.explored,
     };
     await saveSearchCache(cacheKey, cards, workName, result);
     return result;
   }
 
-  async function enumerateTopDeckOptionsBySynergy(candidates, rule, analysis, { maxKeep, workName, onProgress }) {
+  async function enumerateTopDeckOptionsBySynergy(candidates, rule, analysis, optionScan, { maxKeep, workName, onProgress }) {
     const bestOptions = [];
     const ticker = createOptimizationTicker();
     const seenDeckKeys = new Set();
     let explored = 0;
     let processedGroups = 0;
-    const anchorCards = buildAnchorCards(candidates, rule, analysis);
-    const anchorPairs = buildAnchorPairs(anchorCards, rule, analysis);
+    const anchorCards = buildAnchorCards(candidates, rule, analysis, optionScan);
+    const anchorPairs = buildAnchorPairs(anchorCards, rule, analysis, optionScan);
     const generalCore = candidates.slice(0, CONFIG.synergyGeneralKeep);
 
     for (const anchor of anchorCards) {
       await ticker.tick();
-      const pool = buildSynergyPool(anchor.deck, candidates, rule, analysis, generalCore);
+      const pool = buildSynergyPool(anchor.deck, candidates, rule, analysis, optionScan, generalCore);
       await enumerateDecksFromPool(anchor.deck, pool);
       processedGroups++;
       onProgress?.({
@@ -1244,12 +1268,13 @@
         totalGroups: anchorCards.length + anchorPairs.length,
         explored,
         bestScore: bestOptions[0]?.score || 0,
+        bestOption: bestOptions[0] || null,
       });
     }
 
     for (const anchor of anchorPairs) {
       await ticker.tick();
-      const pool = buildSynergyPool(anchor.deck, candidates, rule, analysis, generalCore);
+      const pool = buildSynergyPool(anchor.deck, candidates, rule, analysis, optionScan, generalCore);
       await enumerateDecksFromPool(anchor.deck, pool);
       processedGroups++;
       onProgress?.({
@@ -1257,6 +1282,7 @@
         totalGroups: anchorCards.length + anchorPairs.length,
         explored,
         bestScore: bestOptions[0]?.score || 0,
+        bestOption: bestOptions[0] || null,
       });
     }
 
@@ -1305,6 +1331,7 @@
           totalGroups: anchorCards.length + anchorPairs.length,
           explored,
           bestScore: bestOptions[0]?.score || 0,
+          bestOption: bestOptions[0] || null,
         });
       }
 
@@ -1320,17 +1347,94 @@
     }
   }
 
-  function buildAnchorCards(candidates, rule, analysis) {
+  function enumerateTopDeckOptionsAroundCurrentDeck(cards, currentDeck, candidates, rule, analysis, optionScan, { maxKeep, workName }) {
+    const baseDeck = restoreSeedDeck(currentDeck, cards);
+    if (!baseDeck.length) {
+      return { options: [], explored: 0 };
+    }
+
+    const bestOptions = [];
+    const seen = new Set();
+    let explored = 0;
+    const baseIds = new Set(baseDeck.map(card => card.id));
+    const replacementPool = [...new Map(
+      [...candidates, ...cards]
+        .filter(card => !baseIds.has(card.id))
+        .map(card => [card.id, card])
+    ).values()]
+      .map(card => ({
+        card,
+        score: estimateSynergyWithAnchor(card, baseDeck, rule, analysis, optionScan),
+      }))
+      .sort((a, b) => b.score - a.score)
+      .slice(0, CONFIG.currentDeckSwapPoolKeep)
+      .map(item => item.card);
+
+    pushDeckOption(baseDeck);
+
+    for (let removeIndex = 0; removeIndex < baseDeck.length; removeIndex++) {
+      for (const replacement of replacementPool) {
+        const deck = baseDeck.filter((_, index) => index !== removeIndex);
+        deck.push(replacement);
+        if (new Set(deck.map(card => card.id)).size !== deck.length) continue;
+        pushDeckOption(deck);
+      }
+    }
+
+    const pairPool = replacementPool.slice(0, CONFIG.currentDeckPairSwapKeep);
+    for (let i = 0; i < baseDeck.length; i++) {
+      for (let j = i + 1; j < baseDeck.length; j++) {
+        for (let a = 0; a < pairPool.length; a++) {
+          for (let b = a + 1; b < pairPool.length; b++) {
+            const deck = baseDeck.filter((_, index) => index !== i && index !== j);
+            deck.push(pairPool[a], pairPool[b]);
+            if (new Set(deck.map(card => card.id)).size !== deck.length) continue;
+            pushDeckOption(deck);
+          }
+        }
+      }
+    }
+
+    return {
+      options: bestOptions.sort((a, b) => b.score - a.score),
+      explored,
+    };
+
+    function pushDeckOption(deck) {
+      if (deck.length !== 5) return;
+      const key = deck.map(card => card.id).sort().join('|');
+      if (seen.has(key)) return;
+      seen.add(key);
+      explored++;
+
+      const detail = evaluateDeck(deck, rule);
+      pushBestOption(bestOptions, {
+        workName,
+        deck: [...deck],
+        score: detail.total,
+        detail,
+        key,
+        exploredAt: explored,
+      }, maxKeep);
+    }
+  }
+
+  function restoreSeedDeck(seedDeck, cards) {
+    if (!seedDeck?.length) return [];
+    return restoreDeckRefs(serializeDeckRefs(seedDeck, seedDeck), cards);
+  }
+
+  function buildAnchorCards(candidates, rule, analysis, optionScan = null) {
     return candidates
       .map(card => ({
         deck: [card],
-        score: estimateAnchorStrength(card, rule, analysis),
+        score: estimateAnchorStrength(card, rule, analysis, optionScan),
       }))
       .sort((a, b) => b.score - a.score)
       .slice(0, Math.min(CONFIG.synergyAnchorKeep, candidates.length));
   }
 
-  function buildAnchorPairs(anchorCards, rule, analysis) {
+  function buildAnchorPairs(anchorCards, rule, analysis, optionScan = null) {
     const pairSource = anchorCards.slice(0, Math.min(CONFIG.synergyPairAnchorKeep, anchorCards.length));
     const pairs = [];
 
@@ -1340,7 +1444,7 @@
         const second = pairSource[j].deck[0];
         pairs.push({
           deck: [first, second],
-          score: estimatePairAnchorStrength(first, second, rule, analysis),
+          score: estimatePairAnchorStrength(first, second, rule, analysis, optionScan),
         });
       }
     }
@@ -1350,7 +1454,7 @@
       .slice(0, CONFIG.synergyPairAnchorKeep);
   }
 
-  function buildSynergyPool(anchorDeck, candidates, rule, analysis, generalCore) {
+  function buildSynergyPool(anchorDeck, candidates, rule, analysis, optionScan, generalCore) {
     const anchorIds = new Set(anchorDeck.map(card => card.id));
     const pool = [];
     const seen = new Set(anchorIds);
@@ -1373,7 +1477,7 @@
       .filter(card => !anchorIds.has(card.id))
       .map(card => ({
         card,
-        score: estimateSynergyWithAnchor(card, anchorDeck, rule, analysis),
+        score: estimateSynergyWithAnchor(card, anchorDeck, rule, analysis, optionScan),
       }))
       .sort((a, b) => b.score - a.score);
 
@@ -1389,34 +1493,37 @@
     return pool.slice(0, Math.max(CONFIG.synergyPoolKeep, 10));
   }
 
-  function estimateAnchorStrength(card, rule, analysis = null) {
+  function estimateAnchorStrength(card, rule, analysis = null, optionScan = null) {
     const info = analysis?.byId?.get(card.id);
-    const positiveTotal = info?.positiveTotal ?? card.effects.reduce((sum, eff) => sum + Math.max(0, eff.value), 0);
-    const positiveSlots = info?.positiveSlots ?? card.effects.reduce((sum, eff) => sum + (eff.value > 0 ? 1 : 0), 0);
-    const ownPositive = info?.ownPositive ?? totalPositiveBuffForClub(card, card.club);
-    return estimateCardValue(card, rule, analysis) + positiveTotal * 3 + positiveSlots * 800 + ownPositive * 2;
+    const metrics = getOptionScanInfo(card, optionScan);
+    const positiveTotal = info?.positiveTotal ?? metrics.positiveTotal;
+    const positiveSlots = info?.positiveSlots ?? metrics.maxBuffSlots;
+    const ownPositive = info?.ownPositive ?? metrics.ownPositive;
+    const targetPositive = info?.targetPositive ?? getTargetOptionMetrics(metrics, rule).targetPositive;
+    return estimateCardValue(card, rule, analysis, optionScan) + positiveTotal * 4 + targetPositive * 10 + positiveSlots * 900 + ownPositive * 4;
   }
 
-  function estimatePairAnchorStrength(cardA, cardB, rule, analysis = null) {
-    const base = estimateAnchorStrength(cardA, rule, analysis) + estimateAnchorStrength(cardB, rule, analysis);
-    const synergy = estimateSynergyWithAnchor(cardA, [cardB], rule, analysis) + estimateSynergyWithAnchor(cardB, [cardA], rule, analysis);
+  function estimatePairAnchorStrength(cardA, cardB, rule, analysis = null, optionScan = null) {
+    const base = estimateAnchorStrength(cardA, rule, analysis, optionScan) + estimateAnchorStrength(cardB, rule, analysis, optionScan);
+    const synergy = estimateSynergyWithAnchor(cardA, [cardB], rule, analysis, optionScan) + estimateSynergyWithAnchor(cardB, [cardA], rule, analysis, optionScan);
     return base + synergy;
   }
 
-  function estimateSynergyWithAnchor(card, anchorDeck, rule, analysis = null) {
-    let score = estimateCardValue(card, rule, analysis);
+  function estimateSynergyWithAnchor(card, anchorDeck, rule, analysis = null, optionScan = null) {
+    let score = estimateCardValue(card, rule, analysis, optionScan);
     const targetClubs = new Set(rule.clubs || []);
 
     for (const anchor of anchorDeck) {
       for (const eff of anchor.effects) {
         if (eff.value <= 0) continue;
         if (eff.club === card.club) score += eff.value * 12;
+        if (targetClubs.has(eff.club)) score += eff.value * 8;
       }
 
       for (const eff of card.effects) {
         if (eff.value <= 0) continue;
         if (eff.club === anchor.club) score += eff.value * 9;
-        if (targetClubs.has(eff.club)) score += eff.value * 2;
+        if (targetClubs.has(eff.club)) score += eff.value * 12;
       }
 
       if (anchor.club === card.club) {
@@ -1426,6 +1533,9 @@
 
     if (rule.type === 'minPower' && card.power < rule.minPower) {
       score += (rule.minPower - card.power) * 4;
+    }
+    if (rule.type === 'rarityMultiplier' && rule.rarities?.includes(card.rarity)) {
+      score += applyWorkBase(card, rule) * 0.35;
     }
 
     return score;
@@ -1518,9 +1628,9 @@
     if (arr.length > maxKeep) arr.length = maxKeep;
   }
 
-  async function findBestSingleWork(cards, workName) {
-    const searched = await searchTopDeckOptions(cards, workName, 1, (message) => {
-      setStatus(message);
+  async function findBestSingleWork(cards, workName, onProgress = null) {
+    const searched = await searchTopDeckOptions(cards, workName, 1, onProgress, {
+      seedDeck: getCardsCurrentlyInWork(workName),
     });
     const top = findBestNonEmptyOption(searched.options) || searched.options[0] || { deck: [], score: 0, detail: { total: 0, byCard: {} } };
     return {
@@ -1535,6 +1645,7 @@
 
   async function findGlobalBestAllocation(cards, works, onProgress = null) {
     const unlockedWorks = getOrderedUnlockedWorks(works);
+    const currentDeckByWork = Object.fromEntries(unlockedWorks.map(workName => [workName, getCardsCurrentlyInWork(workName)]));
     const byWork = Object.fromEntries(unlockedWorks.map(workName => [workName, {
       workName,
       deck: [],
@@ -1553,6 +1664,8 @@
       onProgress?.(`全体割当探索: ${workName} を探索中 (${index + 1}/${unlockedWorks.length})`);
       const searched = await searchTopDeckOptions(remainingCards, workName, CONFIG.topDeckOptionsPerWork, (message) => {
         onProgress?.(message);
+      }, {
+        seedDeck: currentDeckByWork[workName] || [],
       });
       searchedByWork.push(searched);
 
@@ -1584,6 +1697,20 @@
     return (options || []).find(option => option.deck?.length > 0) || null;
   }
 
+  function calculateCurrentGlobalPower(works = state.works) {
+    let totalScore = 0;
+    const unlockedWorks = getOrderedUnlockedWorks(works);
+
+    for (const workName of unlockedWorks) {
+      const deck = getCardsCurrentlyInWork(workName);
+      if (!deck.length) continue;
+      const detail = evaluateDeck(deck, WORK_RULES[workName]);
+      totalScore += detail.total || 0;
+    }
+
+    return totalScore;
+  }
+
   // =========================
   // 実行
   // =========================
@@ -1597,7 +1724,17 @@
     ];
 
     setStatus(`${workName}: 最適化を計算中...`);
-    const res = await findBestSingleWork(cardsForWork, workName);
+    const res = await findBestSingleWork(cardsForWork, workName, (progress) => {
+      if (typeof progress === 'string') {
+        setStatus(progress);
+        return;
+      }
+
+      setStatus(progress.text || `${workName}: 最適化を計算中...`);
+      if (progress.bestOption?.deck?.length) {
+        setResultHtml(renderLiveSearchPreview(workName, progress.bestOption, progress));
+      }
+    });
     state.singleResults[workName] = res;
 
     setResultHtml(renderSingleWorkResult(workName, res));
@@ -1614,9 +1751,27 @@
 
     setStatus('全ワーク最適化: 候補デッキの探索を開始します...');
     try {
-      const plan = await findGlobalBestAllocation(allCards, state.works, (message) => {
-        setStatus(message);
+      const currentTotalScore = calculateCurrentGlobalPower(state.works);
+      const plan = await findGlobalBestAllocation(allCards, state.works, (progress) => {
+        if (typeof progress === 'string') {
+          setStatus(progress);
+          return;
+        }
+
+        setStatus(progress.text || '全ワーク最適化: 候補デッキを探索中...');
+        if (progress.bestOption?.deck?.length) {
+          setResultHtml(renderLiveSearchPreview(progress.workName, progress.bestOption, {
+            ...progress,
+            mode: 'global',
+          }));
+        }
       });
+
+      if (plan.totalScore < currentTotalScore) {
+        setStatus(`全ワーク最適化を中止しました。現在の累計Power ${formatNum(currentTotalScore)} を下回るため、候補 ${formatNum(plan.totalScore)} は不採用です`);
+        alert(`全ワーク最適化を中止しました\n現在の累計Power ${formatNum(currentTotalScore)} を下回る候補だったため適用しません`);
+        return;
+      }
 
       state.globalPlan = plan;
       setResultHtml(renderGlobalPlan(state.globalPlan));
@@ -2229,7 +2384,7 @@
     let lastEmit = 0;
 
     return {
-      report({ processedGroups = 0, totalGroups = 0, explored = 0, bestScore = 0 }) {
+      report({ processedGroups = 0, totalGroups = 0, explored = 0, bestScore = 0, bestOption = null }) {
         if (!onProgress) return;
         const now = Date.now();
         if ((now - lastEmit) < 150) return;
@@ -2240,7 +2395,15 @@
         const etaMs = ratio > 0 ? Math.max(0, (elapsed / ratio) - elapsed) : null;
         const pct = Math.floor(ratio * 100);
         const eta = etaMs == null ? '残り時間 推定中' : `残り約 ${formatEta(etaMs)}`;
-        onProgress(`${workName}: シナジー探索 ${formatNum(processedGroups)} / ${formatNum(totalGroups)} 軸 (${pct}%) / 試行 ${formatNum(explored)} / 暫定 ${formatNum(bestScore)} / ${eta}`);
+        onProgress({
+          text: `${workName}: シナジー探索 ${formatNum(processedGroups)} / ${formatNum(totalGroups)} 軸 (${pct}%) / 試行 ${formatNum(explored)} / 暫定 ${formatNum(bestScore)} / ${eta}`,
+          workName,
+          processedGroups,
+          totalGroups,
+          explored,
+          bestScore,
+          bestOption,
+        });
       },
     };
   }
@@ -2297,6 +2460,75 @@
     const area = getStorageArea();
     if (!area) return;
     await new Promise(resolve => area.remove(keys, resolve));
+  }
+
+  async function getOrCreateOptionScan(cards) {
+    const cacheKey = buildOptionScanCacheKey(cards);
+    const stored = await storageGet(cacheKey);
+    const payload = stored?.[cacheKey];
+
+    if (payload?.version === CONFIG.storageCacheVersion) {
+      const restored = restoreOptionScan(payload, cards);
+      if (restored) return restored;
+    }
+
+    const scan = computeOptionScan(cards);
+    await storageSet({
+      [cacheKey]: {
+        version: CONFIG.storageCacheVersion,
+        savedAt: Date.now(),
+        entries: serializeOptionScan(scan, cards),
+      },
+    });
+    return scan;
+  }
+
+  function computeOptionScan(cards) {
+    const byId = new Map();
+    for (const card of cards) {
+      byId.set(card.id, computeCardOptionMetrics(card));
+    }
+    return { byId };
+  }
+
+  function serializeOptionScan(scan, cards) {
+    return cards.map(card => ({
+      sig: getCardSignatureKey(card),
+      metrics: serializeOptionMetrics(scan.byId.get(card.id) || computeCardOptionMetrics(card)),
+    }));
+  }
+
+  function serializeOptionMetrics(metrics) {
+    return {
+      ...metrics,
+      buffByClub: [...(metrics.buffByClub || new Map()).entries()],
+      slotByClub: [...(metrics.slotByClub || new Map()).entries()],
+    };
+  }
+
+  function restoreOptionScan(payload, cards) {
+    const entries = Array.isArray(payload?.entries) ? payload.entries : [];
+    if (!entries.length) return null;
+
+    const bySignature = new Map();
+    for (const entry of entries) {
+      if (!entry?.sig || !entry?.metrics) continue;
+      bySignature.set(entry.sig, entry.metrics);
+    }
+
+    const byId = new Map();
+    for (const card of cards) {
+      const metrics = bySignature.get(getCardSignatureKey(card));
+      if (!metrics) continue;
+      byId.set(card.id, {
+        ...metrics,
+        buffByClub: new Map(metrics.buffByClub || []),
+        slotByClub: new Map(metrics.slotByClub || []),
+      });
+    }
+
+    if (byId.size !== cards.length) return null;
+    return { byId };
   }
 
   async function loadSearchCache(cacheKey, cards, workName) {
@@ -2478,17 +2710,10 @@
     return counts;
   }
 
-  function buildSearchCacheKey(cards, workName) {
+  function buildSearchCacheKey(cards, workName, seedDeck = []) {
     const rule = WORK_RULES[workName];
-    const parts = cards
-      .map(card => [
-        card.name,
-        card.power,
-        card.club,
-        card.rarity,
-        card.effects.map(eff => `${eff.club}:${eff.value}`).sort().join(','),
-      ].join('/'))
-      .sort();
+    const parts = buildCardsFingerprintParts(cards);
+    const seedParts = seedDeck.map(card => getCardSignatureKey(card)).sort();
 
     const base = JSON.stringify({
       version: CONFIG.storageCacheVersion,
@@ -2504,10 +2729,34 @@
         synergyPairAnchorKeep: CONFIG.synergyPairAnchorKeep,
         synergyPoolKeep: CONFIG.synergyPoolKeep,
         synergyGeneralKeep: CONFIG.synergyGeneralKeep,
+        currentDeckSwapPoolKeep: CONFIG.currentDeckSwapPoolKeep,
+        currentDeckPairSwapKeep: CONFIG.currentDeckPairSwapKeep,
       },
+      seedDeck: seedParts,
       cards: parts,
     });
     return `${CACHE_KEY_PREFIX}${hashString(base)}`;
+  }
+
+  function buildOptionScanCacheKey(cards) {
+    const base = JSON.stringify({
+      version: CONFIG.storageCacheVersion,
+      type: 'option-scan',
+      cards: buildCardsFingerprintParts(cards),
+    });
+    return `${OPTION_SCAN_CACHE_KEY_PREFIX}${hashString(base)}`;
+  }
+
+  function buildCardsFingerprintParts(cards) {
+    return cards
+      .map(card => [
+        card.name,
+        card.power,
+        card.club,
+        card.rarity,
+        card.effects.map(eff => `${eff.club}:${eff.value}`).sort().join(','),
+      ].join('/'))
+      .sort();
   }
 
   function hashString(str) {
