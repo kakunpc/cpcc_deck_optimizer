@@ -2172,7 +2172,7 @@
         const liveRoot = findOwnedInventoryCardRoot(card, { excludeInDeck: false });
         const liveButton = liveRoot?.querySelector('.card-favorite-btn, .card-favorite-btn-active');
         return !!liveButton && liveButton.classList.contains('card-favorite-btn-active');
-      }, 2500, 100);
+      }, 2500, 500);
 
       if (changed) {
         await sleep(120);
