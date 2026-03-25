@@ -257,7 +257,7 @@
           cursor:pointer;
           padding:4px 6px;
           background:linear-gradient(180deg,#facc15,#f59e0b);
-          color:#111827;
+          color:#ffffff;
           box-shadow:0 2px 8px rgba(0,0,0,.18);
         }
         .btn-quick-favorite:hover{filter:brightness(1.06)}
@@ -619,6 +619,11 @@
   }
 
   function findOwnedCardRoots() {
+    const inventoryRoots = [...document.querySelectorAll('#inventory-container .card')];
+    if (inventoryRoots.length) {
+      return inventoryRoots;
+    }
+
     const deleteButtons = [...document.querySelectorAll('button')]
       .filter(btn => normalizeSpace(btn.textContent).includes('✖'));
 
@@ -2100,9 +2105,9 @@
       const btn = document.createElement('button');
       btn.type = 'button';
       btn.className = 'btn-quick-favorite';
-      btn.title = 'お気に入りに追加';
+      btn.title = 'お気に入り登録';
       btn.dataset.cpccFavoriteAll = workName;
-      btn.innerHTML = '<span class="material-symbols-rounded">grade</span>';
+      btn.innerHTML = '<span class="material-symbols-rounded" style="font-variation-settings:\'FILL\' 1;">grade</span>';
       btn.addEventListener('click', async (event) => {
         event.preventDefault();
         event.stopPropagation();
@@ -2127,34 +2132,83 @@
 
     let added = 0;
     let already = 0;
+    let failed = 0;
 
     for (const entry of entries) {
-      const root = entry.root?.isConnected ? entry.root : findMatchingWorkEntryRoot(workName, entry.key);
-      if (!root) continue;
-
-      const favoriteButton = root.querySelector('.card-favorite-btn, .card-favorite-btn-active');
-      if (!favoriteButton) continue;
-
-      if (favoriteButton.classList.contains('card-favorite-btn-active')) {
+      const result = await favoriteWorkEntryWithRetry(entry);
+      if (result === 'already') {
         already++;
         continue;
       }
-
-      simulateClick(favoriteButton);
-      highlightElement(favoriteButton, 'gold');
-      const changed = await waitUntil(() => {
-        const liveRoot = root.isConnected ? root : findMatchingWorkEntryRoot(workName, entry.key);
-        const liveButton = liveRoot?.querySelector('.card-favorite-btn, .card-favorite-btn-active');
-        return !!liveButton && liveButton.classList.contains('card-favorite-btn-active');
-      }, 1500, 80);
-
-      if (changed) {
+      if (result === 'added') {
         added++;
+        continue;
       }
-      await sleep(120);
+      failed++;
     }
 
-    setStatus(`${workName}: お気に入り追加 ${added} 枚 / 既に登録 ${already} 枚`);
+    setStatus(`${workName}: お気に入り追加 ${added} 枚 / 既に登録 ${already} 枚 / 失敗 ${failed} 枚`);
+  }
+
+  async function favoriteWorkEntryWithRetry(entry, attempts = 3) {
+    const card = entry.card || parseCardFromRoot(entry.root, 'fav-entry');
+    if (!card) return 'missing';
+
+    for (let attempt = 0; attempt < attempts; attempt++) {
+      const root = findOwnedInventoryCardRoot(card, { excludeInDeck: false });
+      if (!root) return 'missing';
+
+      const favoriteButton = root.querySelector('.card-favorite-btn, .card-favorite-btn-active');
+      if (!favoriteButton) return 'missing';
+      if (favoriteButton.classList.contains('card-favorite-btn-active')) {
+        return 'already';
+      }
+
+      simulateFavoriteClick(favoriteButton);
+      highlightElement(favoriteButton, 'gold');
+      await sleep(CONFIG.autoStepDelay);
+
+      const changed = await waitUntil(() => {
+        const liveRoot = findOwnedInventoryCardRoot(card, { excludeInDeck: false });
+        const liveButton = liveRoot?.querySelector('.card-favorite-btn, .card-favorite-btn-active');
+        return !!liveButton && liveButton.classList.contains('card-favorite-btn-active');
+      }, 2500, 100);
+
+      if (changed) {
+        await sleep(120);
+        return 'added';
+      }
+
+      await sleep(CONFIG.autoClickDelayLong);
+    }
+
+    return 'failed';
+  }
+
+  function simulateFavoriteClick(el) {
+    if (!el) return false;
+
+    try {
+      el.scrollIntoView({ block: 'center', inline: 'center', behavior: 'instant' });
+    } catch { }
+
+    if (typeof el.click === 'function') {
+      el.click();
+      return true;
+    }
+
+    const rect = safeRect(el);
+    const clientX = rect.left + rect.width / 2;
+    const clientY = rect.top + rect.height / 2;
+    const event = new MouseEvent('click', {
+      bubbles: true,
+      cancelable: true,
+      view: window,
+      clientX,
+      clientY,
+    });
+    el.dispatchEvent(event);
+    return true;
   }
 
   // =========================
@@ -2501,7 +2555,20 @@
   }
 
   function findCardRootForJump(card) {
-    return findCardRootForHighlight(card);
+    return findOwnedInventoryCardRoot(card);
+  }
+
+  function findOwnedInventoryCardRoot(card, opts = {}) {
+    const excludeRoots = opts.excludeRoots || new Set();
+    const excludeInDeck = !!opts.excludeInDeck;
+    const targetSignature = getCardSignatureKey(card);
+    const roots = findOwnedCardRoots().filter(root => {
+      if (excludeRoots.has(root)) return false;
+      if (excludeInDeck && root.classList.contains('in-deck')) return false;
+      return true;
+    });
+
+    return roots.find(root => getCardRootSignatureKey(root) === targetSignature) || null;
   }
 
   function findCardRootForHighlight(card, opts = {}) {
