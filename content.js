@@ -96,6 +96,7 @@
     powerFavoriteThreshold: 100,
     powerFavoriteResults: [],
     clubDeckFavoriteResults: [],
+    allClubDeckFavoriteResults: [],
   };
 
   const CACHE_INDEX_KEY = 'cpcc_optimizer_cache_index_v1';
@@ -169,6 +170,7 @@
             <option value="ごちゃまぜ">ごちゃまぜ</option>
             ${CLUBS.map(club => `<option value="${escapeHtml(club)}">${escapeHtml(club)}</option>`).join('')}
           </select>
+          <button id="cpcc-favorite-all-club-decks">全部活をお気に入り</button>
         </div>
       </div>
       <div class="cpcc-card">
@@ -367,6 +369,7 @@
     root.querySelector('#cpcc-power-search').addEventListener('click', runPowerFavoriteSearch);
     root.querySelector('#cpcc-power-threshold').addEventListener('change', handlePowerFavoriteThresholdChange);
     root.querySelector('#cpcc-club-deck-select').addEventListener('change', runClubDeckFavoriteSearch);
+    root.querySelector('#cpcc-favorite-all-club-decks').addEventListener('click', favoriteAllClubDecks);
 
     root.querySelectorAll('[data-work]').forEach(btn => {
       btn.addEventListener('click', () => runSingleWork(btn.dataset.work));
@@ -847,6 +850,30 @@
         </div>
       </div>
       ${renderDeckCards(deck, result?.detail || { byCard: {} })}
+    `;
+  }
+
+  function renderAllClubDeckFavoriteResult(result) {
+    const summaries = result?.summaries || [];
+    const cards = result?.cards || [];
+    const favorited = cards.filter(card => isInventoryCardFavorited(card)).length;
+    const unfavorited = cards.length - favorited;
+
+    const rows = summaries.map(item => `
+      <div class="cpcc-card">
+        <div class="cpcc-title">${escapeHtml(item.club)}</div>
+        <div class="cpcc-score">推定合計Power: ${formatNum(item.score || 0)}</div>
+      </div>
+    `).join('');
+
+    return `
+      <div class="cpcc-card">
+        <div class="cpcc-title">全部活デッキ検索結果</div>
+        <div>部活数 ${formatNum(summaries.length)}件</div>
+        <div>お気に入り対象 ${formatNum(cards.length)}枚</div>
+        <div>お気に入り ${formatNum(favorited)}枚 / 未お気に入り ${formatNum(unfavorited)}枚</div>
+      </div>
+      ${rows}
     `;
   }
 
@@ -2672,6 +2699,65 @@
     });
   }
 
+  async function favoriteAllClubDecks() {
+    await runWithBusyOverlay('部活デッキを計算中...', async () => {
+      await ensureWorkTabActive();
+      const cards = collectAllSearchableCards();
+      const optionScan = await getOrCreateOptionScan(cards);
+      const summaries = [];
+      const uniqueCards = [];
+      const seenKeys = new Set();
+      const totalClubs = CLUBS.length;
+
+      for (let index = 0; index < CLUBS.length; index++) {
+        const clubName = CLUBS[index];
+        updateBusyOverlayProgress(index, totalClubs, 'デッキ計算中');
+        const result = await searchBestFavoriteDeckByClub(clubName, cards, optionScan);
+        summaries.push({
+          club: clubName,
+          score: result.score || 0,
+          deck: result.deck || [],
+        });
+
+        for (const card of result.deck || []) {
+          const key = getCardSignatureKey(card);
+          if (seenKeys.has(key)) continue;
+          seenKeys.add(key);
+          uniqueCards.push(card);
+        }
+      }
+
+      state.allClubDeckFavoriteResults = uniqueCards;
+      updateBusyOverlayProgress(0, uniqueCards.length, '登録中');
+
+      let added = 0;
+      let already = 0;
+      let failed = 0;
+
+      await ensureFiltersCleared();
+
+      for (let index = 0; index < uniqueCards.length; index++) {
+        const card = uniqueCards[index];
+        updateBusyOverlayProgress(index, uniqueCards.length, '登録中');
+        const result = await favoriteCardWithRetry(card);
+        if (result === 'already') {
+          already++;
+        } else if (result === 'added') {
+          added++;
+        } else {
+          failed++;
+        }
+        updateBusyOverlayProgress(index + 1, uniqueCards.length, '登録中');
+      }
+
+      setResultHtml(renderAllClubDeckFavoriteResult({
+        summaries,
+        cards: uniqueCards,
+      }));
+      setStatus(`全部活お気に入り: 追加 ${added} 枚 / 既に登録 ${already} 枚 / 失敗 ${failed} 枚`);
+    });
+  }
+
   async function setClubDeckToActiveWork() {
     await ensureWorkTabActive();
     const activeWorkName = getActiveWorkName();
@@ -3514,13 +3600,13 @@
     ];
   }
 
-  async function searchBestFavoriteDeckByClub(clubName) {
-    const cards = collectAllSearchableCards();
+  async function searchBestFavoriteDeckByClub(clubName, sourceCards = null, sourceOptionScan = null) {
+    const cards = sourceCards || collectAllSearchableCards();
     const mixed = clubName === 'ごちゃまぜ';
     const rule = mixed
       ? { type: 'none', clubs: [] }
       : { type: 'clubMultiplier', clubs: [clubName], multiplier: 1 };
-    const optionScan = await getOrCreateOptionScan(cards);
+    const optionScan = sourceOptionScan || await getOrCreateOptionScan(cards);
     const workName = mixed ? 'ごちゃまぜ' : clubName;
 
     let bestOption = null;
