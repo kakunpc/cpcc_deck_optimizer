@@ -190,6 +190,9 @@
         </div>
       </div>
       <div id="cpcc-result"></div>
+      <div id="cpcc-busy-overlay" style="display:none;">
+        <div class="cpcc-busy-card">お気に入り登録中...</div>
+      </div>
     `;
     document.body.appendChild(root);
     updateLauncherVisibility(false);
@@ -333,6 +336,25 @@
         }
         .btn-quick-favorite:hover{filter:brightness(1.06)}
         .btn-quick-favorite:disabled{opacity:.6;cursor:wait}
+        #cpcc-busy-overlay{
+          position:fixed;
+          inset:0;
+          z-index:1000001;
+          background:rgba(2,6,23,.55);
+          backdrop-filter:blur(2px);
+        }
+        .cpcc-busy-card{
+          position:absolute;
+          left:50%;
+          top:50%;
+          transform:translate(-50%,-50%);
+          background:rgba(15,23,42,.96);
+          color:#fff;
+          padding:14px 18px;
+          border-radius:12px;
+          box-shadow:0 20px 50px rgba(0,0,0,.35);
+          font-weight:700;
+        }
       `;
       document.head.appendChild(style);
     }
@@ -383,6 +405,29 @@
     const btn = document.getElementById('cpcc-optimizer-launcher');
     if (!btn) return;
     btn.style.display = show ? '' : 'none';
+  }
+
+  function setBusyOverlay(visible, text = 'お気に入り登録中...') {
+    const overlay = document.getElementById('cpcc-busy-overlay');
+    if (!overlay) return;
+    const label = overlay.querySelector('.cpcc-busy-card');
+    if (label) {
+      label.textContent = text;
+    }
+    overlay.style.display = visible ? '' : 'none';
+  }
+
+  function updateBusyOverlayProgress(done, total, prefix = '登録中') {
+    setBusyOverlay(true, `${prefix} ${formatNum(done)}/${formatNum(total)}`);
+  }
+
+  async function runWithBusyOverlay(text, task) {
+    setBusyOverlay(true, text);
+    try {
+      return await task();
+    } finally {
+      setBusyOverlay(false);
+    }
   }
 
   function isWorkTabActive() {
@@ -2446,31 +2491,36 @@
   }
 
   async function favoriteWorkDeckCards(workName) {
-    await ensureFiltersCleared();
-    const entries = getCurrentWorkCardEntries(workName);
-    if (!entries.length) {
-      setStatus(`${workName}: お気に入り対象のカードがありません`);
-      return;
-    }
-
-    let added = 0;
-    let already = 0;
-    let failed = 0;
-
-    for (const entry of entries) {
-      const result = await favoriteWorkEntryWithRetry(entry);
-      if (result === 'already') {
-        already++;
-        continue;
+    await runWithBusyOverlay('お気に入り登録中...', async () => {
+      await ensureFiltersCleared();
+      const entries = getCurrentWorkCardEntries(workName);
+      if (!entries.length) {
+        setStatus(`${workName}: お気に入り対象のカードがありません`);
+        return;
       }
-      if (result === 'added') {
-        added++;
-        continue;
-      }
-      failed++;
-    }
 
-    setStatus(`${workName}: お気に入り追加 ${added} 枚 / 既に登録 ${already} 枚 / 失敗 ${failed} 枚`);
+      let added = 0;
+      let already = 0;
+      let failed = 0;
+      const total = entries.length;
+      let done = 0;
+
+      for (const entry of entries) {
+        updateBusyOverlayProgress(done, total);
+        const result = await favoriteWorkEntryWithRetry(entry);
+        if (result === 'already') {
+          already++;
+        } else if (result === 'added') {
+          added++;
+        } else {
+          failed++;
+        }
+        done++;
+        updateBusyOverlayProgress(done, total);
+      }
+
+      setStatus(`${workName}: お気に入り追加 ${added} 枚 / 既に登録 ${already} 枚 / 失敗 ${failed} 枚`);
+    });
   }
 
   async function favoriteWorkEntryWithRetry(entry, attempts = 3) {
@@ -2513,92 +2563,113 @@
   }
 
   async function favoriteOptionSearchResults() {
-    const cards = [...(state.optionFavoriteResults || [])];
-    if (!cards.length) {
-      setStatus('検索結果のカードがありません');
-      return;
-    }
-
-    await ensureFiltersCleared();
-
-    let added = 0;
-    let already = 0;
-    let failed = 0;
-
-    for (const card of cards) {
-      const result = await favoriteCardWithRetry(card);
-      if (result === 'already') {
-        already++;
-      } else if (result === 'added') {
-        added++;
-      } else {
-        failed++;
+    await runWithBusyOverlay('お気に入り登録中...', async () => {
+      const cards = [...(state.optionFavoriteResults || [])];
+      if (!cards.length) {
+        setStatus('検索結果のカードがありません');
+        return;
       }
-    }
 
-    const refreshed = await collectOptionFavoriteSearchResult();
-    setResultHtml(renderOptionFavoriteSearchResult(refreshed));
-    setStatus(`オプションお気に入り: 追加 ${added} 枚 / 既に登録 ${already} 枚 / 失敗 ${failed} 枚`);
+      await ensureFiltersCleared();
+
+      let added = 0;
+      let already = 0;
+      let failed = 0;
+      const total = cards.length;
+      let done = 0;
+
+      for (const card of cards) {
+        updateBusyOverlayProgress(done, total);
+        const result = await favoriteCardWithRetry(card);
+        if (result === 'already') {
+          already++;
+        } else if (result === 'added') {
+          added++;
+        } else {
+          failed++;
+        }
+        done++;
+        updateBusyOverlayProgress(done, total);
+      }
+
+      const refreshed = await collectOptionFavoriteSearchResult();
+      setResultHtml(renderOptionFavoriteSearchResult(refreshed));
+      setStatus(`オプションお気に入り: 追加 ${added} 枚 / 既に登録 ${already} 枚 / 失敗 ${failed} 枚`);
+    });
   }
 
   async function favoritePowerSearchResults() {
-    const cards = [...(state.powerFavoriteResults || [])];
-    if (!cards.length) {
-      setStatus('検索結果のカードがありません');
-      return;
-    }
-
-    await ensureFiltersCleared();
-
-    let added = 0;
-    let already = 0;
-    let failed = 0;
-
-    for (const card of cards) {
-      const result = await favoriteCardWithRetry(card);
-      if (result === 'already') {
-        already++;
-      } else if (result === 'added') {
-        added++;
-      } else {
-        failed++;
+    await runWithBusyOverlay('お気に入り登録中...', async () => {
+      const cards = [...(state.powerFavoriteResults || [])];
+      if (!cards.length) {
+        setStatus('検索結果のカードがありません');
+        return;
       }
-    }
 
-    const refreshed = await collectPowerFavoriteSearchResult();
-    setResultHtml(renderPowerFavoriteSearchResult(refreshed));
-    setStatus(`パワーお気に入り: 追加 ${added} 枚 / 既に登録 ${already} 枚 / 失敗 ${failed} 枚`);
+      await ensureFiltersCleared();
+
+      let added = 0;
+      let already = 0;
+      let failed = 0;
+      const total = cards.length;
+      let done = 0;
+
+      for (const card of cards) {
+        updateBusyOverlayProgress(done, total);
+        const result = await favoriteCardWithRetry(card);
+        if (result === 'already') {
+          already++;
+        } else if (result === 'added') {
+          added++;
+        } else {
+          failed++;
+        }
+        done++;
+        updateBusyOverlayProgress(done, total);
+      }
+
+      const refreshed = await collectPowerFavoriteSearchResult();
+      setResultHtml(renderPowerFavoriteSearchResult(refreshed));
+      setStatus(`パワーお気に入り: 追加 ${added} 枚 / 既に登録 ${already} 枚 / 失敗 ${failed} 枚`);
+    });
   }
 
   async function favoriteClubDeckSearchResults() {
-    const cards = [...(state.clubDeckFavoriteResults || [])];
-    if (!cards.length) {
-      setStatus('デッキの検索結果がありません');
-      return;
-    }
-
-    await ensureFiltersCleared();
-
-    let added = 0;
-    let already = 0;
-    let failed = 0;
-
-    for (const card of cards) {
-      const result = await favoriteCardWithRetry(card);
-      if (result === 'already') {
-        already++;
-      } else if (result === 'added') {
-        added++;
-      } else {
-        failed++;
+    await runWithBusyOverlay('お気に入り登録中...', async () => {
+      const cards = [...(state.clubDeckFavoriteResults || [])];
+      if (!cards.length) {
+        setStatus('デッキの検索結果がありません');
+        return;
       }
-    }
 
-    const select = document.getElementById('cpcc-club-deck-select');
-    const clubName = select?.value || 'ごちゃまぜ';
-    const refreshed = await searchBestFavoriteDeckByClub(clubName);
-    setResultHtml(renderClubDeckFavoriteResult(refreshed));
-    setStatus(`デッキお気に入り: 追加 ${added} 枚 / 既に登録 ${already} 枚 / 失敗 ${failed} 枚`);
+      await ensureFiltersCleared();
+
+      let added = 0;
+      let already = 0;
+      let failed = 0;
+      const total = cards.length;
+      let done = 0;
+
+      for (const card of cards) {
+        updateBusyOverlayProgress(done, total);
+        const result = await favoriteCardWithRetry(card);
+        if (result === 'already') {
+          already++;
+        } else if (result === 'added') {
+          added++;
+        } else {
+          failed++;
+        }
+        done++;
+        updateBusyOverlayProgress(done, total);
+      }
+
+      const select = document.getElementById('cpcc-club-deck-select');
+      const clubName = select?.value || 'ごちゃまぜ';
+      const refreshed = await searchBestFavoriteDeckByClub(clubName);
+      setResultHtml(renderClubDeckFavoriteResult(refreshed));
+      setStatus(`デッキお気に入り: 追加 ${added} 枚 / 既に登録 ${already} 枚 / 失敗 ${failed} 枚`);
+    });
   }
 
   async function setClubDeckToActiveWork() {
