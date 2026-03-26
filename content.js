@@ -369,6 +369,11 @@
           font-size:12px;
           font-weight:500;
           color:rgba(255,255,255,.88);
+          line-height:1.5;
+          white-space:normal;
+        }
+        .cpcc-busy-detail-line{
+          display:block;
         }
       `;
       document.head.appendChild(style);
@@ -446,8 +451,21 @@
     if (!overlay) return;
     const detail = overlay.querySelector('.cpcc-busy-detail');
     if (detail) {
-      detail.textContent = text;
+      detail.innerHTML = text;
     }
+  }
+
+  function formatBusyOverlayCardDetail(card) {
+    if (!card) return '';
+    const optionLines = (card.effects || []).length
+      ? card.effects.map(eff => `<span class="cpcc-busy-detail-line">${escapeHtml(eff.club)} ${eff.value > 0 ? '+' : ''}${formatNum(eff.value)}%</span>`).join('')
+      : '<span class="cpcc-busy-detail-line">効果なし</span>';
+
+    return [
+      `<span class="cpcc-busy-detail-line">[${escapeHtml(card.rarity || '-')}] ${escapeHtml(card.name)} / ${escapeHtml(card.club || '-')}</span>`,
+      `<span class="cpcc-busy-detail-line">Power ${formatNum(card.power || 0)}</span>`,
+      optionLines,
+    ].join('');
   }
 
   async function runWithBusyOverlay(text, task) {
@@ -2561,6 +2579,7 @@
 
       for (const entry of entries) {
         updateBusyOverlayProgress(done, total);
+        setBusyOverlayDetail(formatBusyOverlayCardDetail(entry.card || parseCardFromRoot(entry.root, 'busy-fav')));
         const result = await favoriteWorkEntryWithRetry(entry);
         if (result === 'already') {
           already++;
@@ -2634,6 +2653,7 @@
 
       for (const card of cards) {
         updateBusyOverlayProgress(done, total);
+        setBusyOverlayDetail(formatBusyOverlayCardDetail(card));
         const result = await favoriteCardWithRetry(card);
         if (result === 'already') {
           already++;
@@ -2670,6 +2690,7 @@
 
       for (const card of cards) {
         updateBusyOverlayProgress(done, total);
+        setBusyOverlayDetail(formatBusyOverlayCardDetail(card));
         const result = await favoriteCardWithRetry(card);
         if (result === 'already') {
           already++;
@@ -2706,6 +2727,7 @@
 
       for (const card of cards) {
         updateBusyOverlayProgress(done, total);
+        setBusyOverlayDetail(formatBusyOverlayCardDetail(card));
         const result = await favoriteCardWithRetry(card);
         if (result === 'already') {
           already++;
@@ -2740,7 +2762,7 @@
       for (let index = 0; index < clubTargets.length; index++) {
         const clubName = clubTargets[index];
         updateBusyOverlayProgress(index, totalClubs, 'デッキ計算中');
-        setBusyOverlayDetail(clubName);
+        setBusyOverlayDetail(`<span class="cpcc-busy-detail-line">${escapeHtml(clubName)}</span>`);
         const result = await searchBestFavoriteDeckByClub(clubName, cards, optionScan);
         summaries.push({
           club: clubName,
@@ -2768,7 +2790,7 @@
       for (let index = 0; index < uniqueCards.length; index++) {
         const card = uniqueCards[index];
         updateBusyOverlayProgress(index, uniqueCards.length, '登録中');
-        setBusyOverlayDetail(`${card.name} / Power ${formatNum(card.power)} / ${card.club}`);
+        setBusyOverlayDetail(formatBusyOverlayCardDetail(card));
         const result = await favoriteCardWithRetry(card);
         if (result === 'already') {
           already++;
