@@ -97,6 +97,12 @@
     powerFavoriteResults: [],
     clubDeckFavoriteResults: [],
     allClubDeckFavoriteResults: [],
+    recentSsrKeys: [],
+    recentSsrFreshUntil: new Map(),
+    recentSsrInitialized: false,
+    recentSsrRefreshTimer: null,
+    recentSsrPollTimer: null,
+    recentSsrGlowTimer: null,
   };
 
   const CACHE_INDEX_KEY = 'cpcc_optimizer_cache_index_v1';
@@ -112,6 +118,7 @@
   function boot() {
     if (document.getElementById('cpcc-optimizer-root')) return;
     ensureLauncherButton();
+    ensureRecentSsrWidget();
     createPanel();
     ensureQuickFavoriteButtons();
     ensureVisibilityObserver();
@@ -130,6 +137,7 @@
     state.cards = parseOwnedCardsRobust();
     state.works = detectWorks();
     ensureQuickFavoriteButtons();
+    refreshRecentSsrDisplays();
     setStatus(`総所持 ${allOwnedRoots.length} 枚 / 未使用 ${state.cards.length} 枚 / ワーク ${state.works.filter(w => w.unlocked).length} 件を読み込みました`);
     setResultHtml(renderLoadedPreview());
     void pruneInvalidCachedSearches();
@@ -140,6 +148,7 @@
     state.cards = parseOwnedCardsRobust();
     state.works = detectWorks();
     ensureQuickFavoriteButtons();
+    refreshRecentSsrDisplays();
     setStatus(`総所持 ${allOwnedRoots.length} 枚 / 未使用 ${state.cards.length} 枚 / ワーク ${state.works.filter(w => w.unlocked).length} 件を再同期しました`);
     void pruneInvalidCachedSearches();
   }
@@ -191,6 +200,10 @@
           <button id="cpcc-power-search">検索</button>
         </div>
       </div>
+      <div class="cpcc-card">
+        <div class="cpcc-title">最近引いたSSR</div>
+        <div id="cpcc-recent-ssr"></div>
+      </div>
       <div id="cpcc-result"></div>
       <div id="cpcc-busy-overlay" style="display:none;">
         <div class="cpcc-busy-card">
@@ -222,6 +235,23 @@
           box-shadow:0 12px 30px rgba(0,0,0,.28);
         }
         #cpcc-optimizer-launcher:hover{filter:brightness(1.08)}
+        #cpcc-recent-ssr-widget{
+          position:fixed;
+          right:16px;
+          top:16px;
+          z-index:999998;
+          width:320px;
+          max-height:70vh;
+          overflow:auto;
+          background:rgba(16,24,39,.95);
+          color:#fff;
+          border-radius:12px;
+          padding:12px;
+          box-shadow:0 12px 40px rgba(0,0,0,.35);
+          font-family:system-ui,-apple-system,BlinkMacSystemFont,"Segoe UI",sans-serif;
+          font-size:12px;
+          line-height:1.45;
+        }
         #cpcc-optimizer-root{
           position:fixed;
           right:16px;
@@ -320,6 +350,14 @@
           cursor: pointer;
           transition: transform .12s ease, background-color .12s ease;
         }
+        .cpcc-recent-ssr-card{
+          cursor:pointer;
+          transition:box-shadow .2s ease, transform .2s ease;
+        }
+        .cpcc-recent-ssr-card.is-fresh{
+          box-shadow:0 0 0 2px rgba(250,204,21,.7), 0 0 18px rgba(250,204,21,.35);
+          transform:translateY(-1px);
+        }
 
         .cpcc-result-card:hover{
           transform: translateY(-1px);
@@ -404,6 +442,18 @@
     document.body.appendChild(btn);
   }
 
+  function ensureRecentSsrWidget() {
+    if (document.getElementById('cpcc-recent-ssr-widget')) return;
+    const root = document.createElement('div');
+    root.id = 'cpcc-recent-ssr-widget';
+    root.style.display = 'none';
+    root.innerHTML = `
+      <div class="cpcc-head">最近引いたSSR</div>
+      <div id="cpcc-recent-ssr-widget-list"></div>
+    `;
+    document.body.appendChild(root);
+  }
+
   function hidePanel() {
     const root = document.getElementById('cpcc-optimizer-root');
     if (!root) return;
@@ -426,6 +476,14 @@
     const btn = document.getElementById('cpcc-optimizer-launcher');
     if (!btn) return;
     btn.style.display = show ? '' : 'none';
+  }
+
+  function isGachaTabActive() {
+    const gachaTab = document.getElementById('nav-gacha');
+    const gachaSection = document.getElementById('gacha-section');
+    const gachaTabActive = !!gachaTab && gachaTab.classList.contains('active');
+    const gachaActive = !!gachaSection && gachaSection.classList.contains('active-view');
+    return gachaTabActive && gachaActive;
   }
 
   function setBusyOverlay(visible, text = 'お気に入り登録中...') {
@@ -503,11 +561,21 @@
   function reconcileOptimizerVisibility() {
     const root = document.getElementById('cpcc-optimizer-root');
     const launcher = document.getElementById('cpcc-optimizer-launcher');
+    const recentWidget = document.getElementById('cpcc-recent-ssr-widget');
     const active = isWorkTabActive();
+    const gachaActive = isGachaTabActive();
+    updateRecentSsrPolling(gachaActive);
 
     if (!active) {
       if (root) root.style.display = 'none';
       if (launcher) launcher.style.display = 'none';
+    }
+
+    if (recentWidget) {
+      recentWidget.style.display = gachaActive ? '' : 'none';
+    }
+
+    if (!active) {
       return;
     }
 
@@ -519,6 +587,23 @@
     updateLauncherVisibility(true);
   }
 
+  function updateRecentSsrPolling(gachaActive) {
+    if (gachaActive) {
+      if (!state.recentSsrPollTimer) {
+        refreshRecentSsrDisplays();
+        state.recentSsrPollTimer = setInterval(() => {
+          refreshRecentSsrDisplays();
+        }, 1000);
+      }
+      return;
+    }
+
+    if (state.recentSsrPollTimer) {
+      clearInterval(state.recentSsrPollTimer);
+      state.recentSsrPollTimer = null;
+    }
+  }
+
   function ensureVisibilityObserver() {
     if (state.visibilityObserverStarted) return;
     state.visibilityObserverStarted = true;
@@ -526,6 +611,7 @@
     const observer = new MutationObserver(() => {
       reconcileOptimizerVisibility();
       ensureQuickFavoriteButtons();
+      scheduleRecentSsrRefresh();
     });
 
     const startObserve = () => {
@@ -558,6 +644,123 @@
     const el = document.getElementById('cpcc-result');
     if (el) el.innerHTML = html;
     bindResultButtons();
+  }
+
+  function scheduleRecentSsrRefresh() {
+    if (state.recentSsrRefreshTimer) {
+      clearTimeout(state.recentSsrRefreshTimer);
+    }
+    state.recentSsrRefreshTimer = setTimeout(() => {
+      state.recentSsrRefreshTimer = null;
+      refreshRecentSsrDisplays();
+    }, 350);
+  }
+
+  function refreshRecentSsrDisplays() {
+    const cards = getRecentSsrCards();
+    const keys = cards.map(card => getCardSignatureKey(card));
+    const previous = new Set(state.recentSsrKeys || []);
+    const now = Date.now();
+    const freshUntil = new Map(state.recentSsrFreshUntil || []);
+
+    if (state.recentSsrInitialized) {
+      for (const key of keys) {
+        if (!previous.has(key)) {
+          freshUntil.set(key, now + 3000);
+        }
+      }
+    } else {
+      state.recentSsrInitialized = true;
+    }
+
+    for (const key of [...freshUntil.keys()]) {
+      if (!keys.includes(key) || (freshUntil.get(key) || 0) <= now) {
+        freshUntil.delete(key);
+      }
+    }
+
+    const freshKeys = new Set(
+      keys.filter(key => (freshUntil.get(key) || 0) > now)
+    );
+
+    state.recentSsrKeys = keys;
+    state.recentSsrFreshUntil = freshUntil;
+    refreshRecentSsrPanel(cards, freshKeys);
+    refreshRecentSsrWidget(cards, freshKeys);
+
+    if (state.recentSsrGlowTimer) {
+      clearTimeout(state.recentSsrGlowTimer);
+      state.recentSsrGlowTimer = null;
+    }
+    if (freshKeys.size) {
+      state.recentSsrGlowTimer = setTimeout(() => {
+        state.recentSsrGlowTimer = null;
+        refreshRecentSsrDisplays();
+      }, 3100);
+    }
+  }
+
+  function refreshRecentSsrPanel(cards = getRecentSsrCards(), freshKeys = new Set()) {
+    const host = document.getElementById('cpcc-recent-ssr');
+    if (!host) return;
+
+    host.innerHTML = renderRecentSsrCards(cards, freshKeys);
+    bindResultButtons();
+  }
+
+  function refreshRecentSsrWidget(cards = getRecentSsrCards(), freshKeys = new Set()) {
+    const host = document.getElementById('cpcc-recent-ssr-widget-list');
+    if (!host) return;
+
+    host.innerHTML = renderRecentSsrCards(cards, freshKeys);
+    bindResultButtons();
+  }
+
+  function getRecentSsrCards() {
+    const picked = [];
+    const seen = new Set();
+    const pushCard = (card) => {
+      if (!card || card.rarity !== 'SSR') return;
+      const key = getCardSignatureKey(card);
+      if (seen.has(key)) return;
+      seen.add(key);
+      picked.push(card);
+    };
+
+    const gachaRoots = [...document.querySelectorAll('#gacha-results .card')];
+    gachaRoots.forEach((root, index) => {
+      pushCard(parseCardFromRoot(root, `gacha-ssr-${index}`));
+    });
+
+    parseAllOwnedInventoryCards().forEach(pushCard);
+    return picked.slice(0, 5);
+  }
+
+  function renderRecentSsrCards(cards, freshKeys = new Set()) {
+    if (!cards.length) {
+      return `<div class="cpcc-muted">SSRはまだありません</div>`;
+    }
+
+    return cards.map(card => {
+      const eff = card.effects.length
+        ? card.effects.map(e => `${e.club} ${e.value > 0 ? '+' : ''}${e.value}%`).join(', ')
+        : '効果なし';
+      const freshClass = freshKeys.has(getCardSignatureKey(card)) ? ' is-fresh' : '';
+
+      return `
+        <div
+          class="cpcc-card cpcc-result-card cpcc-recent-ssr-card${freshClass}"
+          data-cpcc-card-id="${escapeHtml(card.id)}"
+          data-cpcc-card-sig="${escapeHtml(getCardSignatureKey(card))}"
+          data-cpcc-card-name="${escapeHtml(card.name)}"
+          title="クリックでカード位置へスクロール"
+        >
+          <div class="cpcc-title">[${escapeHtml(card.rarity)}] ${escapeHtml(card.name)}</div>
+          <div>部活: ${escapeHtml(card.club)} / Power: ${formatNum(card.power)}</div>
+          <div class="cpcc-sub">${escapeHtml(eff)}</div>
+        </div>
+      `;
+    }).join('');
   }
 
   async function ensureFiltersCleared() {
