@@ -119,6 +119,7 @@
     if (document.getElementById('cpcc-optimizer-root')) return;
     ensureLauncherButton();
     ensureRecentSsrWidget();
+    ensureRecentSsrWidgetLauncher();
     createPanel();
     ensureQuickFavoriteButtons();
     ensureVisibilityObserver();
@@ -238,7 +239,7 @@
         #cpcc-recent-ssr-widget{
           position:fixed;
           right:16px;
-          top:16px;
+          bottom:16px;
           z-index:999998;
           width:320px;
           max-height:70vh;
@@ -251,6 +252,40 @@
           font-family:system-ui,-apple-system,BlinkMacSystemFont,"Segoe UI",sans-serif;
           font-size:12px;
           line-height:1.45;
+        }
+        #cpcc-recent-ssr-widget button,
+        #cpcc-recent-ssr-widget-launcher{
+          border:none;
+          border-radius:999px;
+          padding:10px 14px;
+          cursor:pointer;
+          background:#2563eb;
+          color:#fff;
+          font-size:12px;
+          font-weight:700;
+          box-shadow:0 12px 30px rgba(0,0,0,.28);
+        }
+        #cpcc-recent-ssr-widget button:hover,
+        #cpcc-recent-ssr-widget-launcher:hover{filter:brightness(1.08)}
+        .cpcc-widget-head{
+          display:flex;
+          align-items:center;
+          justify-content:space-between;
+          gap:8px;
+          margin-bottom:8px;
+        }
+        #cpcc-close-recent-ssr-widget{
+          margin:0;
+          padding:7px 12px;
+          border-radius:8px;
+          background:#475569;
+          box-shadow:none;
+        }
+        #cpcc-recent-ssr-widget-launcher{
+          position:fixed;
+          right:16px;
+          bottom:16px;
+          z-index:999998;
         }
         #cpcc-optimizer-root{
           position:fixed;
@@ -448,10 +483,36 @@
     root.id = 'cpcc-recent-ssr-widget';
     root.style.display = 'none';
     root.innerHTML = `
-      <div class="cpcc-head">最近引いたSSR</div>
+      <div class="cpcc-widget-head">
+        <div class="cpcc-head">最近引いたSSR</div>
+        <button id="cpcc-close-recent-ssr-widget" type="button">閉じる</button>
+      </div>
       <div id="cpcc-recent-ssr-widget-list"></div>
     `;
+    root.querySelector('#cpcc-close-recent-ssr-widget')?.addEventListener('click', () => {
+      root.style.display = 'none';
+      const launcher = document.getElementById('cpcc-recent-ssr-widget-launcher');
+      if (launcher && isGachaTabActive()) {
+        launcher.style.display = '';
+      }
+    });
     document.body.appendChild(root);
+  }
+
+  function ensureRecentSsrWidgetLauncher() {
+    if (document.getElementById('cpcc-recent-ssr-widget-launcher')) return;
+    const btn = document.createElement('button');
+    btn.id = 'cpcc-recent-ssr-widget-launcher';
+    btn.textContent = '最近SSRを開く';
+    btn.style.display = 'none';
+    btn.addEventListener('click', () => {
+      const widget = document.getElementById('cpcc-recent-ssr-widget');
+      if (widget) {
+        widget.style.display = '';
+      }
+      btn.style.display = 'none';
+    });
+    document.body.appendChild(btn);
   }
 
   function hidePanel() {
@@ -562,6 +623,7 @@
     const root = document.getElementById('cpcc-optimizer-root');
     const launcher = document.getElementById('cpcc-optimizer-launcher');
     const recentWidget = document.getElementById('cpcc-recent-ssr-widget');
+    const recentWidgetLauncher = document.getElementById('cpcc-recent-ssr-widget-launcher');
     const active = isWorkTabActive();
     const gachaActive = isGachaTabActive();
     updateRecentSsrPolling(gachaActive);
@@ -572,7 +634,21 @@
     }
 
     if (recentWidget) {
-      recentWidget.style.display = gachaActive ? '' : 'none';
+      if (!gachaActive) {
+        recentWidget.style.display = 'none';
+      } else if (recentWidget.style.display !== 'none' && recentWidgetLauncher?.style.display !== '') {
+        recentWidget.style.display = '';
+      } else if (recentWidget.style.display === 'none' && recentWidgetLauncher?.style.display === 'none') {
+        recentWidget.style.display = '';
+      }
+    }
+
+    if (recentWidgetLauncher) {
+      if (!gachaActive) {
+        recentWidgetLauncher.style.display = 'none';
+      } else {
+        recentWidgetLauncher.style.display = recentWidget?.style.display === 'none' ? '' : 'none';
+      }
     }
 
     if (!active) {
