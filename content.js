@@ -204,6 +204,9 @@
       <div class="cpcc-card">
         <button id="cpcc-recent-ssr-toggle" class="cpcc-accordion-toggle gray" type="button" aria-expanded="false">最近引いたSSR</button>
         <div id="cpcc-recent-ssr-wrap" style="display:none;">
+          <div class="cpcc-inline cpcc-recent-ssr-actions">
+            <button class="danger" type="button" data-cpcc-action="clear-nondeck-cards">デッキ以外のカードを削除</button>
+          </div>
           <div id="cpcc-recent-ssr"></div>
         </div>
       </div>
@@ -328,6 +331,13 @@
         }
         .cpcc-accordion-toggle[aria-expanded="true"]::after{
           content:'▾';
+        }
+        .cpcc-recent-ssr-actions{
+          margin:8px 0 10px;
+        }
+        .cpcc-recent-ssr-actions button{
+          width:100%;
+          margin:0;
         }
         #cpcc-optimizer-root select{
           min-width:160px;
@@ -490,6 +500,9 @@
     root.querySelectorAll('[data-work]').forEach(btn => {
       btn.addEventListener('click', () => runSingleWork(btn.dataset.work));
     });
+    root.querySelectorAll('[data-cpcc-action="clear-nondeck-cards"]').forEach(btn => {
+      btn.addEventListener('click', triggerGameClearInventoryButton);
+    });
   }
 
   function ensureLauncherButton() {
@@ -512,6 +525,9 @@
         <div class="cpcc-head">最近引いたSSR</div>
         <button id="cpcc-close-recent-ssr-widget" type="button">閉じる</button>
       </div>
+      <div class="cpcc-recent-ssr-actions">
+        <button class="danger" type="button" data-cpcc-action="clear-nondeck-cards">デッキ以外のカードを削除</button>
+      </div>
       <div id="cpcc-recent-ssr-widget-list"></div>
     `;
     root.querySelector('#cpcc-close-recent-ssr-widget')?.addEventListener('click', () => {
@@ -520,6 +536,9 @@
       if (launcher && isGachaTabActive()) {
         launcher.style.display = '';
       }
+    });
+    root.querySelectorAll('[data-cpcc-action="clear-nondeck-cards"]').forEach(btn => {
+      btn.addEventListener('click', triggerGameClearInventoryButton);
     });
     document.body.appendChild(root);
   }
@@ -862,6 +881,18 @@
         </div>
       `;
     }).join('');
+  }
+
+  function triggerGameClearInventoryButton() {
+    const clearBtn = document.getElementById('btn-clear-inventory');
+    if (!clearBtn) {
+      alert('ゲーム側の「デッキ以外のカードを削除」ボタンが見つかりません');
+      return;
+    }
+
+    setStatus('ゲーム側の「デッキ以外のカードを削除」を実行します...');
+    simulateClick(clearBtn, { scroll: false });
+    scheduleRecentSsrRefresh();
   }
 
   async function ensureFiltersCleared() {
