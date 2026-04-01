@@ -109,6 +109,8 @@
     gachaMaxPollTimer: null,
     gachaMaxRefreshInFlight: false,
     gachaMaxRunning: false,
+    lastVisibleSection: '',
+    autoReloadFromGachaScheduled: false,
   };
 
   const GACHA_PULL_CONFIGS = [
@@ -846,6 +848,11 @@
     const recentWidgetLauncher = document.getElementById('cpcc-recent-ssr-widget-launcher');
     const active = isWorkTabActive();
     const gachaActive = isGachaTabActive();
+    const currentSection = active ? 'work' : gachaActive ? 'gacha' : '';
+    if (state.lastVisibleSection === 'gacha' && currentSection === 'work') {
+      scheduleAutoReloadFromGacha();
+    }
+    state.lastVisibleSection = currentSection;
     updateRecentSsrPolling(gachaActive);
     updateGachaMaxPolling(gachaActive);
     ensureGachaMaxButtons();
@@ -883,6 +890,17 @@
     }
 
     updateLauncherVisibility(true);
+  }
+
+  function scheduleAutoReloadFromGacha() {
+    if (state.autoReloadFromGachaScheduled) return;
+    state.autoReloadFromGachaScheduled = true;
+
+    setTimeout(() => {
+      state.autoReloadFromGachaScheduled = false;
+      if (!isWorkTabActive()) return;
+      reloadAll();
+    }, 150);
   }
 
   function updateRecentSsrPolling(gachaActive) {
