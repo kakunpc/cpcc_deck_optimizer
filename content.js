@@ -97,6 +97,9 @@
     powerFavoriteResults: [],
     clubDeckFavoriteResults: [],
     allClubDeckFavoriteResults: [],
+    userIdVisible: false,
+    userIdViewKey: '',
+    userIdProtectionTimer: null,
     recentSsrKeys: [],
     recentSsrFreshUntil: new Map(),
     recentSsrInitialized: false,
@@ -128,6 +131,7 @@
   function boot() {
     if (document.getElementById('cpcc-optimizer-root')) return;
     ensurePageGachaBridge();
+    ensureUserIdProtection();
     ensureLauncherButton();
     ensureRecentSsrWidget();
     ensureRecentSsrWidgetLauncher();
@@ -149,6 +153,7 @@
     const allOwnedRoots = findOwnedCardRoots();
     state.cards = parseOwnedCardsRobust();
     state.works = detectWorks();
+    ensureUserIdProtection();
     ensureQuickFavoriteButtons();
     refreshRecentSsrDisplays({ markFresh: false });
     setStatus(`総所持 ${allOwnedRoots.length} 枚 / 未使用 ${state.cards.length} 枚 / ワーク ${state.works.filter(w => w.unlocked).length} 件を読み込みました`);
@@ -160,10 +165,104 @@
     const allOwnedRoots = findOwnedCardRoots();
     state.cards = parseOwnedCardsRobust();
     state.works = detectWorks();
+    ensureUserIdProtection();
     ensureQuickFavoriteButtons();
     refreshRecentSsrDisplays({ markFresh: false });
     setStatus(`総所持 ${allOwnedRoots.length} 枚 / 未使用 ${state.cards.length} 枚 / ワーク ${state.works.filter(w => w.unlocked).length} 件を再同期しました`);
     void pruneInvalidCachedSearches();
+  }
+
+  function getCurrentViewKey() {
+    const activeTab = document.querySelector('.tab-btn.active[id^="nav-"]')?.id || '';
+    return `${location.pathname}::${activeTab}`;
+  }
+
+  function getStoredUserId() {
+    try {
+      return window.localStorage?.getItem('cp_collect_user_id') || '';
+    } catch {
+      return '';
+    }
+  }
+
+  function getMaskedUserIdText(userId) {
+    if (!userId) return 'hidden';
+    return '*'.repeat(String(userId).length);
+  }
+
+  function scheduleUserIdProtection() {
+    if (state.userIdProtectionTimer) return;
+    state.userIdProtectionTimer = setTimeout(() => {
+      state.userIdProtectionTimer = null;
+      ensureUserIdProtection();
+    }, 0);
+  }
+
+  function ensureUserIdProtection() {
+    const display = document.getElementById('display-user-id');
+    if (!display) return;
+
+    const nextViewKey = getCurrentViewKey();
+    if (state.userIdViewKey && state.userIdViewKey !== nextViewKey) {
+      state.userIdVisible = false;
+    }
+    state.userIdViewKey = nextViewKey;
+
+    let actualUserId = getStoredUserId() || display.dataset.cpccActualUserId || '';
+    const currentText = (display.textContent || '').trim();
+    if (!actualUserId && currentText && currentText !== 'hidden' && !/^[*]+$/.test(currentText)) {
+      actualUserId = currentText;
+    }
+    if (actualUserId) {
+      display.dataset.cpccActualUserId = actualUserId;
+    }
+
+    const wrapper = display.parentElement;
+    if (wrapper && wrapper.dataset.cpccUserIdProtected !== 'true') {
+      wrapper.style.display = 'flex';
+      wrapper.style.alignItems = 'center';
+      wrapper.style.justifyContent = 'space-between';
+      wrapper.style.gap = '8px';
+      wrapper.style.flexWrap = 'wrap';
+      wrapper.dataset.cpccUserIdProtected = 'true';
+    }
+
+    let toggle = document.getElementById('cpcc-user-id-toggle');
+    if (!toggle && wrapper) {
+      toggle = document.createElement('button');
+      toggle.id = 'cpcc-user-id-toggle';
+      toggle.type = 'button';
+      toggle.className = 'tab-btn';
+      toggle.style.fontSize = '0.75rem';
+      toggle.style.padding = '4px 8px';
+      toggle.style.minWidth = '72px';
+      toggle.addEventListener('click', () => {
+        state.userIdVisible = !state.userIdVisible;
+        ensureUserIdProtection();
+      });
+      wrapper.appendChild(toggle);
+    }
+
+    const visible = !!(state.userIdVisible && actualUserId);
+    const nextText = visible ? actualUserId : getMaskedUserIdText(actualUserId);
+    if (display.textContent !== nextText) {
+      display.textContent = nextText;
+    }
+
+    if (toggle) {
+      const nextLabel = visible ? '非表示' : '表示';
+      if (toggle.textContent !== nextLabel) {
+        toggle.textContent = nextLabel;
+      }
+      const shouldDisable = !actualUserId;
+      if (toggle.disabled !== shouldDisable) {
+        toggle.disabled = shouldDisable;
+      }
+      const nextPressed = visible ? 'true' : 'false';
+      if (toggle.getAttribute('aria-pressed') !== nextPressed) {
+        toggle.setAttribute('aria-pressed', nextPressed);
+      }
+    }
   }
 
   // =========================
@@ -825,6 +924,7 @@
     state.visibilityObserverStarted = true;
 
     const observer = new MutationObserver(() => {
+      scheduleUserIdProtection();
       reconcileOptimizerVisibility();
       ensureQuickFavoriteButtons();
       ensureGachaMaxButtons();
