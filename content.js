@@ -138,7 +138,7 @@
     state.cards = parseOwnedCardsRobust();
     state.works = detectWorks();
     ensureQuickFavoriteButtons();
-    refreshRecentSsrDisplays();
+    refreshRecentSsrDisplays({ markFresh: false });
     setStatus(`総所持 ${allOwnedRoots.length} 枚 / 未使用 ${state.cards.length} 枚 / ワーク ${state.works.filter(w => w.unlocked).length} 件を読み込みました`);
     setResultHtml(renderLoadedPreview());
     void pruneInvalidCachedSearches();
@@ -149,7 +149,7 @@
     state.cards = parseOwnedCardsRobust();
     state.works = detectWorks();
     ensureQuickFavoriteButtons();
-    refreshRecentSsrDisplays();
+    refreshRecentSsrDisplays({ markFresh: false });
     setStatus(`総所持 ${allOwnedRoots.length} 枚 / 未使用 ${state.cards.length} 枚 / ワーク ${state.works.filter(w => w.unlocked).length} 件を再同期しました`);
     void pruneInvalidCachedSearches();
   }
@@ -339,6 +339,12 @@
           width:100%;
           margin:0;
         }
+        #cpcc-optimizer-root .cpcc-recent-ssr-actions .danger,
+        #cpcc-recent-ssr-widget .cpcc-recent-ssr-actions .danger{
+          background:linear-gradient(180deg,#ef4444,#b91c1c);
+          color:#fff;
+          box-shadow:0 10px 24px rgba(185,28,28,.28);
+        }
         #cpcc-optimizer-root select{
           min-width:160px;
           border:none;
@@ -414,7 +420,36 @@
         }
         .cpcc-recent-ssr-card{
           cursor:pointer;
-          transition:box-shadow .2s ease, transform .2s ease;
+          transition:box-shadow .2s ease, transform .2s ease, background-color .2s ease, border-color .2s ease;
+          border:1px solid rgba(255,255,255,.08);
+        }
+        .cpcc-recent-ssr-card.is-club-match{
+          background:linear-gradient(135deg, rgba(59,130,246,.34), rgba(147,197,253,.2));
+          border-color:rgba(147,197,253,.88);
+          box-shadow:0 0 0 1px rgba(191,219,254,.8), 0 0 24px rgba(59,130,246,.28);
+          transform:translateY(-1px);
+        }
+        .cpcc-recent-ssr-card.is-duplicate-option{
+          background:linear-gradient(135deg, rgba(250,204,21,.24), rgba(253,224,71,.12));
+          border-color:rgba(253,224,71,.62);
+          box-shadow:0 0 0 1px rgba(254,240,138,.35), 0 0 18px rgba(250,204,21,.16);
+        }
+        .cpcc-recent-ssr-card.is-option-threshold-match{
+          background:linear-gradient(135deg, rgba(250,204,21,.34), rgba(255,243,128,.18));
+          border-color:rgba(254,240,138,.92);
+          box-shadow:0 0 0 1px rgba(254,240,138,.75), 0 0 24px rgba(250,204,21,.26);
+        }
+        .cpcc-recent-ssr-card.is-club-match.is-duplicate-option{
+          background:linear-gradient(135deg, rgba(59,130,246,.34), rgba(250,204,21,.28));
+          border-color:rgba(255,255,255,.92);
+          box-shadow:0 0 0 1px rgba(255,255,255,.72), 0 0 28px rgba(96,165,250,.24), 0 0 22px rgba(250,204,21,.18);
+        }
+        .cpcc-recent-ssr-card.is-club-match.is-option-threshold-match,
+        .cpcc-recent-ssr-card.is-duplicate-option.is-option-threshold-match,
+        .cpcc-recent-ssr-card.is-club-match.is-duplicate-option.is-option-threshold-match{
+          background:linear-gradient(135deg, rgba(59,130,246,.3), rgba(250,204,21,.34));
+          border-color:rgba(255,248,196,.96);
+          box-shadow:0 0 0 1px rgba(255,248,196,.78), 0 0 30px rgba(250,204,21,.25), 0 0 24px rgba(96,165,250,.18);
         }
         .cpcc-recent-ssr-card.is-fresh{
           box-shadow:0 0 0 2px rgba(250,204,21,.7), 0 0 18px rgba(250,204,21,.35);
@@ -776,14 +811,18 @@
     }, 350);
   }
 
-  function refreshRecentSsrDisplays() {
+  function refreshRecentSsrDisplays(opts = {}) {
+    const markFresh = opts.markFresh !== false;
     const cards = getRecentSsrCards();
     const keys = cards.map(card => getCardSignatureKey(card));
     const previous = new Set(state.recentSsrKeys || []);
     const now = Date.now();
     const freshUntil = new Map(state.recentSsrFreshUntil || []);
 
-    if (state.recentSsrInitialized) {
+    if (!markFresh) {
+      freshUntil.clear();
+      state.recentSsrInitialized = true;
+    } else if (state.recentSsrInitialized) {
       for (const key of keys) {
         if (!previous.has(key)) {
           freshUntil.set(key, now + 3000);
@@ -866,10 +905,13 @@
         ? card.effects.map(e => `${e.club} ${e.value > 0 ? '+' : ''}${e.value}%`).join(', ')
         : '効果なし';
       const freshClass = freshKeys.has(getCardSignatureKey(card)) ? ' is-fresh' : '';
+      const ownClubBoostClass = hasOwnClubPositiveEffect(card) ? ' is-club-match' : '';
+      const duplicateOptionClass = hasDuplicatePositiveEffect(card) ? ' is-duplicate-option' : '';
+      const optionThresholdClass = matchesOptionFavoriteThreshold(card) ? ' is-option-threshold-match' : '';
 
       return `
         <div
-          class="cpcc-card cpcc-result-card cpcc-recent-ssr-card${freshClass}"
+          class="cpcc-card cpcc-result-card cpcc-recent-ssr-card${freshClass}${ownClubBoostClass}${duplicateOptionClass}${optionThresholdClass}"
           data-cpcc-card-id="${escapeHtml(card.id)}"
           data-cpcc-card-sig="${escapeHtml(getCardSignatureKey(card))}"
           data-cpcc-card-name="${escapeHtml(card.name)}"
@@ -881,6 +923,30 @@
         </div>
       `;
     }).join('');
+  }
+
+  function hasOwnClubPositiveEffect(card) {
+    return (card.effects || []).some(eff => eff.value > 0 && eff.club === card.club);
+  }
+
+  function hasDuplicatePositiveEffect(card) {
+    const counts = new Map();
+    for (const eff of (card.effects || [])) {
+      if (!(eff.value > 0) || !eff.club) continue;
+      const key = `${eff.club}:${eff.value}`;
+      counts.set(key, (counts.get(key) || 0) + 1);
+      if ((counts.get(key) || 0) >= 2) {
+        return true;
+      }
+    }
+    return false;
+  }
+
+  function matchesOptionFavoriteThreshold(card) {
+    const threshold = normalizeOptionFavoriteThreshold(state.optionFavoriteThreshold);
+    const metrics = computeCardOptionMetrics(card);
+    const bestMatch = getOptionFavoriteBestMatch(metrics);
+    return (bestMatch.value || 0) >= threshold;
   }
 
   function triggerGameClearInventoryButton() {
