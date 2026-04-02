@@ -10,7 +10,6 @@
 
   // 候補数が多すぎると重いので、必要に応じて調整
   const CONFIG = {
-    limitBreakGacha: true,
     topDeckOptionsPerWork: 120, // 各ワークで保持する候補デッキ数
     optimizeYieldEvery: 250,
     storageCacheVersion: 4,
