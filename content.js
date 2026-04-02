@@ -97,6 +97,7 @@
     powerFavoriteResults: [],
     clubDeckFavoriteResults: [],
     allClubDeckFavoriteResults: [],
+    debuffUnfavoriteResults: [],
     userIdVisible: false,
     userIdViewKey: '',
     userIdProtectionTimer: null,
@@ -312,6 +313,12 @@
           <input id="cpcc-power-threshold" type="number" min="0" step="10" value="100">
           <span>以上を</span>
           <button id="cpcc-power-search">検索</button>
+        </div>
+      </div>
+      <div class="cpcc-card">
+        <div class="cpcc-title">自己デバフお気に入り解除</div>
+        <div class="cpcc-inline">
+          <button id="cpcc-debuff-unfavorite-search">検索</button>
         </div>
       </div>
       <div class="cpcc-card">
@@ -666,6 +673,7 @@
     root.querySelector('#cpcc-power-threshold').addEventListener('change', handlePowerFavoriteThresholdChange);
     root.querySelector('#cpcc-club-deck-select').addEventListener('change', runClubDeckFavoriteSearch);
     root.querySelector('#cpcc-favorite-all-club-decks').addEventListener('click', favoriteAllClubDecks);
+    root.querySelector('#cpcc-debuff-unfavorite-search').addEventListener('click', runDebuffUnfavoriteSearch);
     root.querySelector('#cpcc-recent-ssr-toggle').addEventListener('click', () => {
       const toggle = root.querySelector('#cpcc-recent-ssr-toggle');
       const wrap = root.querySelector('#cpcc-recent-ssr-wrap');
@@ -1230,6 +1238,17 @@
         btn.disabled = true;
         try {
           await favoriteClubDeckSearchResults();
+        } finally {
+          btn.disabled = false;
+        }
+      };
+    });
+
+    document.querySelectorAll('[data-cpcc-action="unfavorite-debuff-all"]').forEach(btn => {
+      btn.onclick = async () => {
+        btn.disabled = true;
+        try {
+          await unfavoriteDebuffCards();
         } finally {
           btn.disabled = false;
         }
@@ -3545,6 +3564,147 @@
       }));
       setStatus(`全部活お気に入り: 追加 ${added} 枚 / 既に登録 ${already} 枚 / 失敗 ${failed} 枚`);
     });
+  }
+
+  async function runDebuffUnfavoriteSearch() {
+    setStatus('自己デバフがついたお気に入りカードを検索中...');
+    const result = collectDebuffUnfavoriteSearchResult();
+    setResultHtml(renderDebuffUnfavoriteSearchResult(result));
+    setStatus(`デバフお気に入り ${result.entries.length} 枚見つけました`);
+  }
+
+  function collectDebuffUnfavoriteSearchResult() {
+    const cards = parseAllOwnedInventoryCards();
+    const entries = cards
+      .filter(card => {
+        if (!isInventoryCardFavorited(card)) return false;
+        return (card.effects || []).some(eff => eff.club === card.club && eff.value < 0);
+      })
+      .map(card => ({
+        card,
+        debuffValue: (card.effects || []).find(eff => eff.club === card.club && eff.value < 0)?.value ?? 0,
+      }))
+      .sort((a, b) => a.debuffValue - b.debuffValue);
+
+    state.debuffUnfavoriteResults = entries.map(e => e.card);
+    return { entries };
+  }
+
+  function renderDebuffUnfavoriteSearchResult(result) {
+    const entries = result?.entries || [];
+    const total = entries.length;
+
+    if (!total) {
+      return `
+        <div class="cpcc-card">
+          <div class="cpcc-title">デバフお気に入り解除</div>
+          <div class="cpcc-sub">対象: 自所属部活へのデバフがあるお気に入りカード</div>
+          <span class="cpcc-muted">対象カードはありません</span>
+        </div>
+      `;
+    }
+
+    const cards = entries.map(({ card, debuffValue }) => {
+      const eff = card.effects.length
+        ? card.effects.map(e => `${e.club} ${e.value > 0 ? '+' : ''}${e.value}%`).join(', ')
+        : '効果なし';
+      return `
+        <div
+          class="cpcc-card cpcc-result-card"
+          data-cpcc-card-id="${escapeHtml(card.id)}"
+          data-cpcc-card-name="${escapeHtml(card.name)}"
+          data-cpcc-card-sig="${escapeHtml(getCardSignatureKey(card))}"
+        >
+          <div class="cpcc-card-name">${escapeHtml(card.name)}</div>
+          <div class="cpcc-sub">${escapeHtml(card.club)} / ${escapeHtml(card.rarity)} / Power ${formatNum(card.power)}</div>
+          <div class="cpcc-sub">${escapeHtml(eff)}</div>
+          <div class="cpcc-sub" style="color:#ef4444;">${escapeHtml(card.club)} ${formatNum(debuffValue)}%</div>
+        </div>
+      `;
+    }).join('');
+
+    return `
+      <div class="cpcc-card">
+        <div class="cpcc-title">デバフお気に入り解除</div>
+        <div class="cpcc-sub">対象: 自所属部活へのデバフがあるお気に入りカード</div>
+        <div>カード枚数 ${formatNum(total)}枚</div>
+        <div class="cpcc-btns">
+          <button class="danger" data-cpcc-action="unfavorite-debuff-all">お気に入りを全て外す</button>
+        </div>
+      </div>
+      ${cards}
+    `;
+  }
+
+  async function unfavoriteDebuffCards() {
+    await runWithBusyOverlay('お気に入り解除中...', async () => {
+      const cards = [...(state.debuffUnfavoriteResults || [])];
+      if (!cards.length) {
+        setStatus('解除対象のカードがありません');
+        return;
+      }
+
+      await ensureFiltersCleared();
+
+      let removed = 0;
+      let already = 0;
+      let failed = 0;
+      const total = cards.length;
+      let done = 0;
+
+      for (const card of cards) {
+        updateBusyOverlayProgress(done, total);
+        setBusyOverlayDetail(formatBusyOverlayCardDetail(card));
+        const result = await unfavoriteCardWithRetry(card);
+        if (result === 'already') {
+          already++;
+        } else if (result === 'removed') {
+          removed++;
+        } else {
+          failed++;
+        }
+        done++;
+        updateBusyOverlayProgress(done, total);
+      }
+
+      const refreshed = collectDebuffUnfavoriteSearchResult();
+      setResultHtml(renderDebuffUnfavoriteSearchResult(refreshed));
+      setStatus(`デバフお気に入り解除: 解除 ${removed} 枚 / 既に解除済み ${already} 枚 / 失敗 ${failed} 枚`);
+    });
+  }
+
+  async function unfavoriteCardWithRetry(card, attempts = 3) {
+    if (!card) return 'missing';
+
+    for (let attempt = 0; attempt < attempts; attempt++) {
+      const root = findOwnedInventoryCardRoot(card, { excludeInDeck: false });
+      if (!root) return 'missing';
+
+      const favoriteButton = root.querySelector('.card-favorite-btn, .card-favorite-btn-active');
+      if (!favoriteButton) return 'missing';
+      if (!favoriteButton.classList.contains('card-favorite-btn-active')) {
+        return 'already';
+      }
+
+      simulateFavoriteClick(favoriteButton);
+      highlightElement(favoriteButton, 'red');
+      await sleep(CONFIG.autoStepDelay);
+
+      const changed = await waitUntil(() => {
+        const liveRoot = findOwnedInventoryCardRoot(card, { excludeInDeck: false });
+        const liveButton = liveRoot?.querySelector('.card-favorite-btn, .card-favorite-btn-active');
+        return !!liveButton && !liveButton.classList.contains('card-favorite-btn-active');
+      }, 2500, 500);
+
+      if (changed) {
+        await sleep(120);
+        return 'removed';
+      }
+
+      await sleep(CONFIG.autoClickDelayLong);
+    }
+
+    return 'failed';
   }
 
   async function setClubDeckToActiveWork() {
