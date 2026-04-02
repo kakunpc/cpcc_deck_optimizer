@@ -10,6 +10,7 @@
 
   // 候補数が多すぎると重いので、必要に応じて調整
   const CONFIG = {
+    limitBreakGacha: true,
     topDeckOptionsPerWork: 120, // 各ワークで保持する候補デッキ数
     optimizeYieldEvery: 250,
     storageCacheVersion: 4,
@@ -601,6 +602,7 @@
           flex-direction:column;
           gap:6px;
           margin-top:10px;
+          padding:0 1rem;
         }
         .cpcc-gacha-max-btn{
           width:100%;
@@ -929,6 +931,14 @@
   }
 
   function updateGachaMaxPolling(gachaActive) {
+    if (CONFIG.limitBreakGacha !== true) {
+      if (state.gachaMaxPollTimer) {
+        clearInterval(state.gachaMaxPollTimer);
+        state.gachaMaxPollTimer = null;
+      }
+      return;
+    }
+
     if (gachaActive) {
       if (!state.gachaMaxPollTimer) {
         void refreshGachaMaxButtons();
@@ -3231,6 +3241,11 @@
   }
 
   function ensureGachaMaxButtons() {
+    if (CONFIG.limitBreakGacha !== true) {
+      document.querySelectorAll('.cpcc-gacha-max-wrap').forEach(node => node.remove());
+      return;
+    }
+
     const banners = [...document.querySelectorAll('#gacha-section .gacha-banner')];
     banners.forEach(root => {
       const config = detectGachaPullConfig(root);
@@ -3286,6 +3301,7 @@
   }
 
   async function refreshGachaMaxButtons(options = {}) {
+    if (CONFIG.limitBreakGacha !== true) return;
     if (!isGachaTabActive()) return;
     if (state.gachaMaxRefreshInFlight && !options.force) return;
 
